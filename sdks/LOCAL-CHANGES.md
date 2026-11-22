@@ -1,0 +1,2 @@
+- iPhoneOS9.3.sdk: added usr/lib/system/liblaunch.tbd (copied from 10.3; libSystem re-exports it but theos/sdks omits it)
+- iPhoneOS9.3.sdk: libsystem_c.tbd += bcmp bzero memccpy memchr memcmp memcpy memmove memset memset_pattern{4,8,16} strchr strcmp strncmp (resolver-backed, dropped by theos's tbd generator)

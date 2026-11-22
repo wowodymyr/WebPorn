@@ -3,3 +3,4 @@
 /prebuilt/
 /sdks/*
 !/sdks/LOCAL-CHANGES.md
+/device/

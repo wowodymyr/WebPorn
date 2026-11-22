@@ -20,7 +20,8 @@ set(CMAKE_OBJCXX_COMPILER clang++)
 foreach(lang C CXX OBJC OBJCXX ASM)
     set(CMAKE_${lang}_COMPILER_TARGET ${WP_TRIPLE})
     # Fixes for old-SDK headers that modern libc++/WebKit trip over.
-    set(CMAKE_${lang}_FLAGS_INIT "-isystem ${CMAKE_CURRENT_LIST_DIR}/sdk-overlay/include")
+    # -faligned-allocation: libwpcxxcompat provides aligned new/delete below iOS 11.
+    set(CMAKE_${lang}_FLAGS_INIT "-isystem ${CMAKE_CURRENT_LIST_DIR}/sdk-overlay/include -faligned-allocation")
 endforeach()
 
 set(CMAKE_AR /usr/lib/llvm-21/bin/llvm-ar CACHE FILEPATH "")

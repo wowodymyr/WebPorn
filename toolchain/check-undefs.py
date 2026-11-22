@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""List undefined symbols of a Mach-O that no .tbd in the SDK exports.
+"""List undefined symbols of a Mach-O that the target OS does not export.
 
-  check-undefs.py <sdk> <macho>
+  check-undefs.py <sdk-dir | exports.tsv> <macho>
 
-The SDK's .tbd stubs describe what the OS exports, so anything left over will
-fail to bind on device unless the stubs library provides it.
+With an SDK, the exports come from its .tbd stubs. With exports.tsv (from
+dsc-exports.py on a device's shared cache) they are exactly what that OS
+version ships. Anything listed will fail to bind on device unless the stubs
+library provides it.
 """
 import pathlib, re, subprocess, sys
 
@@ -12,7 +14,12 @@ sdk, macho = pathlib.Path(sys.argv[1]), sys.argv[2]
 nm = pathlib.Path.home() / "theos/toolchain/linux/iphone/bin/nm"
 
 exported = set()
-for tbd in sdk.rglob("*.tbd"):
+if sdk.is_file():
+    for line in sdk.open():
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) == 2:
+            exported.add(fields[1])
+for tbd in (sdk.rglob("*.tbd") if sdk.is_dir() else []):
     text = tbd.read_text(errors="replace")
     for block in re.findall(r"(?:symbols|objc-classes|objc-ivars|weak-def-symbols|thread-local-symbols|re-exports)\s*:\s*\[([^\]]*)\]", text):
         for sym in re.split(r"[,\s]+", block):

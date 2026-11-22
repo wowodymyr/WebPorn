@@ -43,6 +43,25 @@ Builds run inside the `ubuntu` toolbox (Ubuntu 26.04).
   libc++abi) and `clock_gettime` (iOS 10+). Link with `-Wl,-hidden-lwpcxxcompat`.
   Build: `toolchain/build-compat.sh <arch> <min> <sdk>`.
 
+- `icu/dylib/libwpicu.dylib` — ICU 74.2 (same version as WebKit's `Source/WTF/icu`
+  headers), unversioned symbols, installed on device as `/var/webporn/lib/libwpicu.dylib`.
+  Build (needs the host ICU in `build/icu-host`): `toolchain/build-icu.sh`.
+- `woff2/lib/libwpwoff2.a` — decode-only woff2 1.0.2 + brotli 1.1.0. Build: `toolchain/build-woff2.sh`.
+
+## WebKit
+
+`toolchain/configure-webkit.sh <arch> <min> <sdk> [cmake args]` configures
+`src/webkit` into `build/webkit-<arch>-ios<N>` (CMake Mac port, `WK_IOS_TARGET=ON`).
+JSC-only: `-DENABLE_WEBCORE=OFF -DENABLE_WEBKIT_LEGACY=OFF -DENABLE_WEBKIT=OFF
+-DDEVELOPER_MODE=ON -DENABLE_XSLT=OFF -DENABLE_WEBGL=OFF`, then `ninja jsc`.
+
+## Device
+
+Engine files go to `/var/webporn/` (iPhone 5 root fs has ~565 MB free).
+`device/<name>/exports.tsv` is the export list of that device's shared cache
+(`toolchain/dsc-exports.py`); pass it to `check-undefs.py` instead of an SDK.
+SSH host alias `iphone` (iPhone 5, iOS 8.4.1) is in `~/.ssh/config`.
+
 `toolchain/check-undefs.py <sdk> <macho>` lists undefined symbols the SDK's .tbd
 files do not export. For armv7 the 9.3 SDK is newer than the iOS 8.4.1 devices, so
 a clean result there is necessary but not sufficient.

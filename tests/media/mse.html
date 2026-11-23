@@ -1,0 +1,45 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<!-- MSE: mse-video.mp4 (H.264) and mse-audio.mp4 (AAC), fragmented, in two
+     source buffers appended in 256 KB pieces; plays, seeks to 20 s after 8 s. -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline controls></video>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [];
+const t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-14).join(' | '); }
+window.onerror = (m) => note('JS error ' + m);
+const vt = 'video/mp4; codecs="avc1.4d401e"', at = 'audio/mp4; codecs="mp4a.40.2"';
+note('MediaSource ' + typeof MediaSource + ' video ' + (window.MediaSource && MediaSource.isTypeSupported(vt)) + ' audio ' + (window.MediaSource && MediaSource.isTypeSupported(at)) + ' webm ' + (window.MediaSource && MediaSource.isTypeSupported('video/webm; codecs="vp9"')));
+for (const e of ['loadedmetadata','loadeddata','canplay','playing','seeking','seeked','ended','error','waiting'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(2) + ' d=' + (v.duration||0).toFixed(2) + ' rs=' + v.readyState + (e=='error' ? ' code=' + (v.error && v.error.code) + ' ' + (v.error && v.error.message) : '')));
+let ticks = 0;
+v.addEventListener('timeupdate', () => { if (++ticks % 8 == 0) note('timeupdate ' + v.currentTime.toFixed(2) + ' buf ' + (v.buffered.length ? v.buffered.end(0).toFixed(1) : '-')); });
+function feed(sb, url) {
+  return fetch(url).then(r => r.arrayBuffer()).then(data => new Promise((resolve, reject) => {
+    let offset = 0;
+    const next = () => {
+      if (offset >= data.byteLength) { sb.removeEventListener('updateend', next); resolve(); return; }
+      const end = Math.min(offset + 262144, data.byteLength);
+      try { sb.appendBuffer(data.slice(offset, end)); } catch (e) { reject(e); return; }
+      offset = end;
+    };
+    sb.addEventListener('updateend', next);
+    sb.addEventListener('error', () => reject(new Error('sourcebuffer error ' + url)));
+    next();
+  }));
+}
+const ms = new MediaSource();
+ms.addEventListener('sourceopen', () => {
+  note('sourceopen');
+  const vb = ms.addSourceBuffer(vt), ab = ms.addSourceBuffer(at);
+  Promise.all([feed(vb, 'mse-video.mp4'), feed(ab, 'mse-audio.mp4')]).then(() => {
+    note('appended, buffered ' + vb.buffered.end(0).toFixed(2) + ' / ' + ab.buffered.end(0).toFixed(2));
+    ms.endOfStream();
+  }).catch(e => note('append failed ' + e));
+});
+v.src = URL.createObjectURL(ms);
+setTimeout(() => { note('seek 20'); v.currentTime = 20; }, 8000);
+</script>

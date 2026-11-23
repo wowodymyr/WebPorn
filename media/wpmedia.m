@@ -93,6 +93,9 @@ typedef struct wpstream wpstream;
 struct wpmedia_player {
     wpmedia_client client;
     wpstream* stream; // wpmedia_open_stream; outlives p until libVLC has stopped
+    int live; // the stream is not seekable (MSE): no seeking back after the preroll
+    int started; // startMedia ran: the drawable exists
+    int pauseOnFirstTime; // a restarted stream plays until its first frame, then pauses
     libvlc_media_player_t* player;
     libvlc_media_t* media;
     void* layer; // WPMediaLayer, retained
@@ -258,7 +261,10 @@ static void finishPreroll(wpmedia_player* p)
         return;
     debugLog("preroll done, pending seek %.2f, wants playing %d", p->pendingSeek, p->wantsPlaying);
     p->ready = 1;
-    if (p->pendingSeek >= 0) {
+    if (p->live) {
+        p->pendingSeek = -1;
+        libvlc_media_player_set_rate(p->player, p->rate);
+    } else if (p->pendingSeek >= 0) {
         seekTo(p, p->pendingSeek);
         p->pendingSeek = -1;
     } else if (!p->wantsPlaying)
@@ -323,6 +329,11 @@ static void handleEvent(const libvlc_event_t* event, void* data)
                     stats.i_played_abuffers, stats.i_lost_abuffers, libvlc_audio_get_volume(p->player));
             }
             debugLog("time %.2f ready %d seekTarget %.2f", seconds, p->ready, p->seekTarget);
+            if (p->pauseOnFirstTime) {
+                p->pauseOnFirstTime = 0;
+                if (!p->wantsPlaying)
+                    libvlc_media_player_set_pause(p->player, 1);
+            }
             if (!p->ready) {
                 // Audio only: no video output will come.
                 if (seconds > 0 && !libvlc_video_get_track_count(p->player))
@@ -673,7 +684,7 @@ static int isMP4Family(const char* url, const char* mimeType)
     return 0;
 }
 
-static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType);
+static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType, wpstream* retired);
 
 void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, const char* userAgent, const char* referrer)
 {
@@ -692,26 +703,52 @@ void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, cons
         snprintf(option, sizeof(option), ":http-referrer=%s", referrer);
         libvlc_media_add_option(media, option);
     }
-    startMedia(p, media, url, mimeType);
+    startMedia(p, media, url, mimeType, NULL);
 }
 
 void wpmedia_open_stream(wpmedia_player* p, const char* url, const char* mimeType, unsigned long long size, int seekable)
 {
-    if (p->stream) {
-        reportState(p, WPMEDIA_STATE_ERROR);
-        return;
+    // A stream after a stream (MSE after a seek) replaces it: reads of the old one
+    // fail from now on, and it is freed once libVLC has let go of it.
+    wpstream* retired = p->stream;
+    if (retired) {
+        pthread_mutex_lock(&retired->lock);
+        retired->closed = 1;
+        pthread_cond_broadcast(&retired->changed);
+        pthread_mutex_unlock(&retired->lock);
     }
     p->stream = streamCreate(p, size, seekable);
+    p->live = !p->stream->seekable;
     debugLog("open stream %s (%s) size %llu seekable %d", url, mimeType ? mimeType : "-", size, p->stream->seekable);
     libvlc_media_t* media = libvlc_media_new_callbacks(sharedInstance(), streamOpen, streamRead, p->stream->seekable ? streamSeek : NULL, streamClose, p->stream);
     if (!media) {
         reportState(p, WPMEDIA_STATE_ERROR);
         return;
     }
-    startMedia(p, media, url, mimeType);
+    startMedia(p, media, url, mimeType, retired);
 }
 
-static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType)
+// After the first stream: the same drawable and video output, a new input.
+static void restartMedia(wpmedia_player* p, libvlc_media_t* media, wpstream* retired)
+{
+    dispatch_async(p->queue, ^{
+        libvlc_media_t* old = p->media;
+        debugLog("restart stream, wants playing %d", p->wantsPlaying);
+        // Stops the old input (its reads fail: the stream is closed).
+        libvlc_media_player_set_media(p->player, media);
+        p->media = media;
+        if (old)
+            libvlc_media_release(old);
+        if (retired)
+            streamDestroy(retired);
+        p->seekTarget = -1;
+        p->pauseOnFirstTime = !p->wantsPlaying;
+        libvlc_media_player_set_rate(p->player, p->rate);
+        libvlc_media_player_play(p->player);
+    });
+}
+
+static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType, wpstream* retired)
 {
     // Pause on the last frame instead of stopping: a stopped input closes the video
     // output, and replaying or seeking back would set it up again (~2.5 s).
@@ -722,6 +759,13 @@ static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url
     libvlc_media_add_option(media, ":adaptive-maxheight=720");
     if (isMP4Family(url, mimeType))
         libvlc_media_add_option(media, ":demux=avformat,any");
+    if (mimeType && !strcasecmp(mimeType, "video/x-matroska"))
+        libvlc_media_add_option(media, ":demux=mkv");
+    if (p->started) {
+        restartMedia(p, media, retired);
+        return;
+    }
+    p->started = 1;
     WPMediaLayer* layer = (__bridge WPMediaLayer*)p->layer;
     libvlc_media_player_t* player = p->player;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -739,7 +783,9 @@ static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url
             libvlc_media_player_set_media(player, media);
             p->media = media;
             libvlc_audio_set_volume(player, 0); // until finishPreroll
-            libvlc_media_player_set_rate(player, p->rate);
+            // A live stream cannot go back to the start after the preroll: crawl
+            // through it while the video output is set up (2.5 s -> 80 ms).
+            libvlc_media_player_set_rate(player, p->live ? 1.0f / 32 : p->rate);
             libvlc_media_player_play(player);
         });
     });

@@ -13,10 +13,39 @@
 
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <vlc/vlc.h>
 #include "wpmedia.h"
+
+// MARK: - Debug log
+
+// /var/webporn/wpmedia-debug present: events and decisions to wpmedia.log.
+static void debugLog(const char* format, ...) __attribute__((format(printf, 1, 2)));
+static void debugLog(const char* format, ...)
+{
+    static FILE* file;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (!access("/var/webporn/wpmedia-debug", F_OK))
+            file = fopen("/var/mobile/Media/webporn/wpmedia-events.log", "w");
+    });
+    if (!file)
+        return;
+    static CFAbsoluteTime start;
+    if (!start)
+        start = CFAbsoluteTimeGetCurrent();
+    fprintf(file, "%7.3f ", CFAbsoluteTimeGetCurrent() - start);
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fputc('\n', file);
+    fflush(file);
+}
 
 // MARK: - Host layer
 
@@ -64,6 +93,8 @@ struct wpmedia_player {
     int ready; // drawable attached and media set
     int wantsPlaying;
     double pendingSeek; // < 0: none
+    double seekTarget; // < 0: none; time updates from before it are dropped
+    CFAbsoluteTime seekIssued;
     float volume;
     int muted;
     float rate;
@@ -169,16 +200,41 @@ static void reportState(wpmedia_player* p, wpmedia_state state)
 // only on play, and the clock runs while the first seconds of video are lost.
 // At the first video output (or the first time update, audio only) the player
 // pauses back at the start unless asked to play, which also leaves a poster frame.
+// libVLC keeps reporting the old position for a while after set_time (it
+// reports the target at once, then the old time again, then nothing until the
+// demuxer has landed): for 4 s, drop times before the target or further past it
+// than the time since the seek allows.
+static void seekTo(wpmedia_player* p, double seconds)
+{
+    debugLog("seek to %.2f", seconds);
+    p->seekTarget = seconds;
+    p->seekIssued = CFAbsoluteTimeGetCurrent();
+    libvlc_media_player_set_time(p->player, (libvlc_time_t)(seconds * 1000));
+}
+
+static int isStaleTime(wpmedia_player* p, double seconds)
+{
+    if (p->seekTarget < 0)
+        return 0;
+    double elapsed = CFAbsoluteTimeGetCurrent() - p->seekIssued;
+    if (elapsed > 4) {
+        p->seekTarget = -1;
+        return 0;
+    }
+    return seconds < p->seekTarget - 0.5 || seconds > p->seekTarget + elapsed * p->rate + 1;
+}
+
 static void finishPreroll(wpmedia_player* p)
 {
     if (p->ready)
         return;
+    debugLog("preroll done, pending seek %.2f, wants playing %d", p->pendingSeek, p->wantsPlaying);
     p->ready = 1;
     if (p->pendingSeek >= 0) {
-        libvlc_media_player_set_time(p->player, (libvlc_time_t)(p->pendingSeek * 1000));
+        seekTo(p, p->pendingSeek);
         p->pendingSeek = -1;
     } else if (!p->wantsPlaying)
-        libvlc_media_player_set_time(p->player, 0);
+        seekTo(p, 0);
     libvlc_media_player_set_pause(p->player, !p->wantsPlaying);
     libvlc_audio_set_volume(p->player, p->muted ? 0 : (int)(p->volume * 100));
     reportState(p, p->wantsPlaying ? WPMEDIA_STATE_PLAYING : WPMEDIA_STATE_PAUSED);
@@ -229,12 +285,15 @@ static void handleEvent(const libvlc_event_t* event, void* data)
     case libvlc_MediaPlayerTimeChanged: {
         double seconds = event->u.media_player_time_changed.new_time / 1000.0;
         dispatch_async(p->queue, ^{
+            debugLog("time %.2f ready %d seekTarget %.2f", seconds, p->ready, p->seekTarget);
             if (!p->ready) {
                 // Audio only: no video output will come.
                 if (seconds > 0 && !libvlc_video_get_track_count(p->player))
                     finishPreroll(p);
                 return;
             }
+            if (isStaleTime(p, seconds))
+                return;
             if (p->client.time_changed)
                 p->client.time_changed(p->client.context, seconds);
         });
@@ -290,6 +349,7 @@ wpmedia_player* wpmedia_create(const wpmedia_client* client)
     p->player = libvlc_media_player_new(instance);
     p->queue = dispatch_queue_create("net.webporn.media", DISPATCH_QUEUE_SERIAL);
     p->pendingSeek = -1;
+    p->seekTarget = -1;
     p->volume = 1;
     p->rate = 1;
     WPMediaLayer* layer = [WPMediaLayer layer];
@@ -422,8 +482,9 @@ void wpmedia_pause(wpmedia_player* p)
 void wpmedia_seek(wpmedia_player* p, double seconds)
 {
     dispatch_async(p->queue, ^{
+        debugLog("wpmedia_seek %.2f ready %d", seconds, p->ready);
         if (p->ready)
-            libvlc_media_player_set_time(p->player, (libvlc_time_t)(seconds * 1000));
+            seekTo(p, seconds);
         else
             p->pendingSeek = seconds;
     });

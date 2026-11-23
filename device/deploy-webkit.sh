@@ -21,4 +21,9 @@ for name in JavaScriptCore WebCore WebKitLegacy; do
     scp -q "$ST/$name" "$HOST:/var/webporn/lib/$name.framework/$name.new"
     ssh "$HOST" "mv /var/webporn/lib/$name.framework/$name.new /var/webporn/lib/$name.framework/$name"
 done
+# Resources looked up through the framework bundle: the media controls' icons
+# (Apple's build flattens images/iOS into modern-media-controls/images).
+MMC=$WP/src/webkit/Source/WebCore/Modules/modern-media-controls/images/iOS
+tar -C "$MMC" -cf - . | ssh "$HOST" "rm -rf /var/webporn/lib/WebCore.framework/modern-media-controls; mkdir -p /var/webporn/lib/WebCore.framework/modern-media-controls/images && tar -C /var/webporn/lib/WebCore.framework/modern-media-controls/images -xf -"
+scp -q "$B/lib/WebCore.framework/Info.plist" "$HOST:/var/webporn/lib/WebCore.framework/Info.plist"
 echo "deployed $TAG frameworks to $HOST"

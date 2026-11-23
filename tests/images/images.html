@@ -1,0 +1,19 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>images</title>
+<style>img{border:1px solid #888;margin:4px;width:60px;height:45px}</style>
+<div id="imgs"></div>
+<picture><source srcset="t.webp" type="image/webp"><img id="pic" src="t.jpg"></picture>
+<pre id="log"></pre>
+<script>
+const files = ['t.png','t.jpg','t.gif','t.webp','t-alpha.webp','t.avif'], out = [];
+let pending = files.length;
+function done() { out.push('picture picked ' + document.getElementById('pic').currentSrc.split('/').pop());
+  document.getElementById('log').textContent = out.join('\n'); document.title = out.join(' | '); }
+for (const f of files) {
+  const img = new Image();
+  img.onload = () => { out.push(f + ' ok ' + img.naturalWidth + 'x' + img.naturalHeight); if (!--pending) done(); };
+  img.onerror = () => { out.push(f + ' ERROR'); if (!--pending) done(); };
+  img.src = f; document.getElementById('imgs').appendChild(img);
+}
+</script>

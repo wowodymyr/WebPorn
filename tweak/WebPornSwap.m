@@ -7,6 +7,9 @@
 //   3. rebind every bind / lazy-bind / weak-bind slot that points into the old engine
 //   4. redirect dlsym() lookups into the old engine (UIKit soft-links some entry points)
 //   5. attach foreign categories of old-engine classes to the new classes
+// Loaded into every UIKit app; it only acts in the apps switched on in
+// Settings > WebPorn (AppList page, tweak/prefs/WebPorn.plist), and loads TLSFix
+// (/var/webporn/lib/tlsfix.dylib) there first.
 // With /var/webporn/swap-dryrun present nothing is changed; the log only says
 // what would be rebound and what does not resolve. Log: /var/mobile/Media/webporn/swap.log
 
@@ -732,10 +735,12 @@ static bool appEnabled(void)
     NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
     if (!bundleID || [bundleID isEqualToString:@"com.apple.springboard"])
         return false;
-    NSString* list = [NSString stringWithContentsOfFile:@"/var/webporn/swap-apps.txt" encoding:NSUTF8StringEncoding error:nil];
-    if (!list)
+    // Settings > WebPorn writes Enabled-<bundle id>; the test app is on unless switched off.
+    NSDictionary* settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/net.webporn.swap.plist"];
+    id enabled = [settings objectForKey:[@"Enabled-" stringByAppendingString:bundleID]];
+    if (!enabled)
         return [bundleID isEqualToString:@"net.webporn.wptest"];
-    return [[list componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] containsObject:bundleID];
+    return [enabled boolValue];
 }
 
 __attribute__((constructor)) static void webPornSwap(void)
@@ -747,6 +752,8 @@ __attribute__((constructor)) static void webPornSwap(void)
         dryRun = !access("/var/webporn/swap-dryrun", F_OK);
         logf_("WebPornSwap in %s (pid %d)%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid(), dryRun ? " DRY RUN" : "");
         realDlsym = dlsym;
+        if (!dlopen("/var/webporn/lib/tlsfix.dylib", RTLD_NOW))
+            logf_("TLSFix: %s\n", dlerror());
 
         for (int i = 0; i < EngineImageCount; i++)
             oldHandles[i] = dlopen(oldPaths[i], RTLD_NOLOAD | RTLD_LAZY);

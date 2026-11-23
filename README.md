@@ -184,7 +184,12 @@ Gotchas found on the way:
   argument domain and answers selectors no class implements any more on Safari's own classes
   with nil (logged to `safari.log`; only `-[BrowserControllerWK1 _updateReaderBackgroundViewFrame]`
   so far); `/var/webporn/safari-trace` traces every WebView delegate call of the WK1 controllers.
-  Safari is in `/var/webporn/swap-apps.txt` and the WebPornSwap / tlsfix filters.
+  Which apps get the engine: Settings > WebPorn (`tweak/prefs/WebPorn.plist`, an AppList
+  page of switches, installed by `tweak/build.sh`) writes `Enabled-<bundle id>` to
+  `/var/mobile/Library/Preferences/net.webporn.swap.plist`; WebPornSwap loads into every
+  UIKit app and acts only where switched on (WPTest defaults to on), dlopening TLSFix
+  (`/var/webporn/lib/tlsfix.dylib`, no longer a tweak of its own) first. WebPornSafari only
+  acts when Safari is on. Not yet tried in an App Store app (container sandbox).
   `tests/safari/sites.sh`: 10/10 sites load and render (screens via VNC, `tests/vnc.sh`,
   Veency; vncdotool in `build/vncpkgs`).
   Fixes it needed, in WebPornSwap (they apply to every swapped app):

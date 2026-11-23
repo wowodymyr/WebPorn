@@ -18,4 +18,8 @@ D=/Library/MobileSubstrate/DynamicLibraries
 scp -q "$B/$N.dylib" "$HOST:$D/$N.dylib.new"
 scp -q "$WP/tweak/$N.plist" "$HOST:$D/$N.plist"
 ssh "$HOST" "mv -f $D/$N.dylib.new $D/$N.dylib"
+if [ "$N" = WebPornSwap ]; then
+    # Settings > WebPorn (AppList switches); TLSFix comes from tweak/build-tlsfix.sh.
+    scp -q "$WP/tweak/prefs/WebPorn.plist" "$HOST:/Library/PreferenceLoader/Preferences/WebPorn.plist"
+fi
 echo "installed $N on $HOST"

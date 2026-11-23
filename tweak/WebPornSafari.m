@@ -267,6 +267,10 @@ __attribute__((constructor)) static void webPornSafari(void)
     @autoreleasepool {
         if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.mobilesafari"])
             return;
+        // Only together with the engine swap (Settings > WebPorn > Safari).
+        NSDictionary* settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/net.webporn.swap.plist"];
+        if (![[settings objectForKey:@"Enabled-com.apple.mobilesafari"] boolValue])
+            return;
         logFile = fopen(LOG_PATH, "w");
         safariHeader = _dyld_get_image_header(0);
         useLegacyWebKit();

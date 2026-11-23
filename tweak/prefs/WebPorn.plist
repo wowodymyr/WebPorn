@@ -1,0 +1,33 @@
+{
+    entry = {
+        cell = PSLinkCell;
+        label = "WebPorn";
+        bundle = AppList;
+        isController = 1;
+        ALSettingsPath = "/var/mobile/Library/Preferences/net.webporn.swap.plist";
+        ALSettingsKeyPrefix = "Enabled-";
+        ALSettingsDefaultValue = 0;
+        ALChangeNotification = "net.webporn.swap/changed";
+        ALSectionDescriptors = (
+            {
+                title = "WebPorn";
+                footer-title = "Apps switched on here load the new WebKit engine (and TLSFix) in place of the system one. Takes effect the next time the app starts.";
+                items = ();
+            },
+            {
+                title = "System Applications";
+                predicate = "isSystemApplication = TRUE";
+                cell-class-name = ALSwitchCell;
+                icon-size = 29;
+                suppress-hidden-apps = 1;
+            },
+            {
+                title = "User Applications";
+                predicate = "isSystemApplication = FALSE";
+                cell-class-name = ALSwitchCell;
+                icon-size = 29;
+                suppress-hidden-apps = 1;
+            }
+        );
+    };
+}

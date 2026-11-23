@@ -15,6 +15,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -553,6 +554,154 @@ static void moveCategories(void)
     }
 }
 
+// MARK: - Engine SPI shims
+
+// Methods system code (UIKit, WebUI, MobileSafari) sends to the old engine that the
+// new one removed or renamed: toolchain/engine-spi-audit.py lists them with the old
+// classes that implemented them. Each is added only where the new class lacks it.
+
+static void* const transientPropertiesKey = (void*)&transientPropertiesKey;
+
+static id historyItemTransientProperty(id self, SEL _cmd, NSString* key)
+{
+    return [objc_getAssociatedObject(self, transientPropertiesKey) objectForKey:key];
+}
+
+static void historyItemSetTransientProperty(id self, SEL _cmd, id value, NSString* key)
+{
+    NSMutableDictionary* properties = objc_getAssociatedObject(self, transientPropertiesKey);
+    if (!properties) {
+        properties = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(self, transientPropertiesKey, properties, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (value)
+        [properties setObject:value forKey:key];
+    else
+        [properties removeObjectForKey:key];
+}
+
+static id returnNil(id self, SEL _cmd) { return nil; }
+static BOOL returnNo(id self, SEL _cmd) { return NO; }
+static void doNothing(id self, SEL _cmd) { }
+static void doNothingWithArgument(id self, SEL _cmd, id argument) { }
+static unsigned long long defaultOriginQuota(id self, SEL _cmd) { return 5 * 1024 * 1024; }
+
+// The old engine dropped the cache by shrinking it to nothing; so do we.
+static void webViewClearBackForwardCache(id self, SEL _cmd)
+{
+    id list = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("backForwardList"));
+    NSUInteger size = ((NSUInteger (*)(id, SEL))objc_msgSend)(list, sel_registerName("pageCacheSize"));
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(list, sel_registerName("setPageCacheSize:"), 0);
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(list, sel_registerName("setPageCacheSize:"), size);
+}
+
+// -freezeVisibleRect / -unfreezeVisibleRect became -willRotate / -didRotate.
+static void wakWindowFreezeVisibleRect(id self, SEL _cmd)
+{
+    ((void (*)(id, SEL))objc_msgSend)(self, sel_registerName("willRotate"));
+}
+
+static void wakWindowUnfreezeVisibleRect(id self, SEL _cmd)
+{
+    ((void (*)(id, SEL))objc_msgSend)(self, sel_registerName("didRotate"));
+}
+
+// iOS 8 UIKit builds key events with a trailing characterSet:; the new initializer
+// takes an input manager hint instead and finds the character set itself.
+static id webEventInitKeyEvent(id self, SEL _cmd, int type, double timeStamp, NSString* characters, NSString* charactersIgnoringModifiers,
+    unsigned modifiers, BOOL repeating, unsigned flags, uint16_t keyCode, BOOL tabKey, int characterSet)
+{
+    SEL initializer = sel_registerName("initWithKeyEventType:timeStamp:characters:charactersIgnoringModifiers:modifiers:isRepeating:withFlags:withInputManagerHint:keyCode:isTabKey:");
+    return ((id (*)(id, SEL, int, double, NSString*, NSString*, unsigned, BOOL, unsigned, NSString*, uint16_t, BOOL))objc_msgSend)(
+        self, initializer, type, timeStamp, characters, charactersIgnoringModifiers, modifiers, repeating, flags, nil, keyCode, tabKey);
+}
+
+static void webViewAddUserStyleSheet(id self, SEL _cmd, NSString* group, id world, NSString* source, NSURL* url, NSArray* whitelist, NSArray* blacklist)
+{
+    SEL selector = sel_registerName("_addUserStyleSheetToGroup:world:source:url:includeMatchPatternStrings:excludeMatchPatternStrings:injectedFrames:");
+    ((void (*)(id, SEL, NSString*, id, NSString*, NSURL*, NSArray*, NSArray*, int))objc_msgSend)(
+        self, selector, group, world, source, url, whitelist, blacklist, 0 /* WebInjectInAllFrames */);
+}
+
+// iOS 8 UIKit pushes the orientation into the frame; the new engine pulls it from
+// the UIKit delegate in -deviceOrientationChanged, which UIKit 8 does not answer.
+static void webFrameSendOrientationChangeEvent(id self, SEL _cmd, int orientation)
+{
+    id webView = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("webView"));
+    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(webView, sel_registerName("_setDeviceOrientation:"), (NSUInteger)orientation);
+}
+
+static void addShim(const char* className, bool classMethod, const char* selectorName, IMP implementation, const char* types)
+{
+    Class cls = objc_getClass(className);
+    if (!cls) {
+        logf_("shim %s: no class\n", className);
+        return;
+    }
+    if (classMethod)
+        cls = object_getClass(cls);
+    SEL selector = sel_registerName(selectorName);
+    // class_respondsToSelector realizes the class first (iOS 8 class_addMethod does not).
+    if (class_respondsToSelector(cls, selector))
+        return;
+    class_addMethod(cls, selector, implementation, types);
+    logf_("shim %c[%s %s]\n", classMethod ? '+' : '-', className, selectorName);
+}
+
+static void installEngineShims(void)
+{
+    addShim("WebHistoryItem", false, "_transientPropertyForKey:", (IMP)historyItemTransientProperty, "@@:@");
+    addShim("WebHistoryItem", false, "_setTransientProperty:forKey:", (IMP)historyItemSetTransientProperty, "v@:@@");
+    addShim("WebHistoryItem", false, "_bookmarkID", (IMP)returnNil, "@@:");
+    addShim("WebHistoryItem", false, "_sharedLinkUniqueIdentifier", (IMP)returnNil, "@@:");
+    addShim("WebHistoryItem", false, "_isInPageCache", (IMP)returnNo, "c@:");
+    addShim("WebView", false, "_clearBackForwardCache", (IMP)webViewClearBackForwardCache, "v@:");
+    addShim("WebView", true, "_addUserStyleSheetToGroup:world:source:url:whitelist:blacklist:", (IMP)webViewAddUserStyleSheet, "v@:@@@@@@");
+    addShim("WebPreferences", false, "_setLayoutInterval:", (IMP)doNothingWithArgument, "v@:i");
+    addShim("WebHTMLView", false, "_updateControlTints", (IMP)doNothing, "v@:");
+    addShim("WAKWindow", false, "freezeVisibleRect", (IMP)wakWindowFreezeVisibleRect, "v@:");
+    addShim("WAKWindow", false, "unfreezeVisibleRect", (IMP)wakWindowUnfreezeVisibleRect, "v@:");
+    // Application cache is gone upstream: no quota manager, a fixed default quota.
+    addShim("WebSecurityOrigin", false, "applicationCacheQuotaManager", (IMP)returnNil, "@@:");
+    addShim("WebApplicationCache", true, "defaultOriginQuota", (IMP)defaultOriginQuota, "Q@:");
+    addShim("WebEvent", false, "initWithKeyEventType:timeStamp:characters:charactersIgnoringModifiers:modifiers:isRepeating:withFlags:keyCode:isTabKey:characterSet:",
+        (IMP)webEventInitKeyEvent, "@@:id@@IcISci");
+    addShim("WebFrame", false, "sendOrientationChangeEvent:", (IMP)webFrameSendOrientationChangeEvent, "v@:i");
+}
+
+// MARK: - Old WTF
+
+// MobileSafari and WebUI call WTF::callOnMainThread(void (*)(void*), void*) from the
+// old JavaScriptCore (the new WTF has no such overload, so the bind stays there).
+// The old engine never ran WTF::initializeMainThread, so its main-thread caller
+// object is nil and every such call is silently dropped: Safari's asynchronous
+// navigation policy answers (Safe Browsing check for a new host) never arrive and
+// a cross-host redirect stalls forever. Send them to the main queue instead,
+// holding the web thread lock: with the WebThread on, WTF's "main thread" is
+// whoever holds it, and the callbacks go straight back into WebCore (Timer
+// asserts otherwise). The run loop observer drops the lock after the iteration.
+static void (*newWebThreadLock)(void);
+
+static void oldCallOnMainThread(void (*function)(void*), void* context)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (newWebThreadLock)
+            newWebThreadLock();
+        function(context);
+    });
+}
+
+static void hookOldWTF(void (*hookFunction)(void*, void*, void**))
+{
+    void* callOnMainThread = oldHandles[JSCImage] ? realDlsym(oldHandles[JSCImage], "_ZN3WTF16callOnMainThreadEPFvPvES0_") : NULL;
+    newWebThreadLock = realDlsym(newLookupHandles[WebCoreImage], "WebThreadLock");
+    if (callOnMainThread && hookFunction) {
+        void* original;
+        hookFunction(callOnMainThread, (void*)oldCallOnMainThread, &original);
+    }
+    logf_("old WTF::callOnMainThread: %s\n", callOnMainThread && hookFunction ? "redirected to the main queue" : "not hooked");
+}
+
 // MARK: - Media
 
 // The AVFoundation media engine needs AVURLAsset option keys and resourceLoader
@@ -639,8 +788,11 @@ __attribute__((constructor)) static void webPornSwap(void)
         if (hookFunction && !dryRun)
             hookFunction((void*)dlsym, (void*)swapDlsym, (void**)&realDlsym);
         logf_("dlsym hook: %s\n", hookFunction ? (dryRun ? "skipped (dry run)" : "installed") : "no Substrate");
+        if (!dryRun)
+            hookOldWTF(hookFunction);
 
         moveCategories();
+        installEngineShims();
         disableAVFoundationEngine();
         swapped = true;
         logf_("swap done\n");

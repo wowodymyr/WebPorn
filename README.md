@@ -177,6 +177,36 @@ Gotchas found on the way:
   from later releases: bbc.com threw). Until libWebPornMedia exists the tweak turns it
   off by putting `WebKitAVFoundationEnabled = NO` into the NSUserDefaults argument
   domain (no `<video>` engine at all); `/var/webporn/use-avfoundation` keeps it on.
+- MobileSafari: iOS 8 Safari still ships its WebKit1 implementation (`BrowserControllerWK1`,
+  `TabDocumentWK1`, `LoadingControllerWK1`, `HistoryWK1`, `ReaderContextWK1`), selected by the
+  `UseLegacyWebKit` default, so the in-process swap covers it; no WKWebView shim needed.
+  `tweak/WebPornSafari.m` (`NAME=WebPornSafari tweak/build.sh`) sets that default in the
+  argument domain and answers selectors no class implements any more on Safari's own classes
+  with nil (logged to `safari.log`; only `-[BrowserControllerWK1 _updateReaderBackgroundViewFrame]`
+  so far); `/var/webporn/safari-trace` traces every WebView delegate call of the WK1 controllers.
+  Safari is in `/var/webporn/swap-apps.txt` and the WebPornSwap / tlsfix filters.
+  `tests/safari/sites.sh`: 10/10 sites load and render (screens via VNC, `tests/vnc.sh`,
+  Veency; vncdotool in `build/vncpkgs`).
+  Fixes it needed, in WebPornSwap (they apply to every swapped app):
+  - engine SPI shims: `toolchain/engine-spi-audit.py <cache> <new machos> -- <consumers>` lists
+    selectors UIKit / WebUI / MobileSafari send that only the old engine implements, with the
+    old classes (16: WebHistoryItem transient properties, WebPreferences `_setLayoutInterval:`,
+    WAKWindow freeze -> willRotate / didRotate, WebEvent key init with `characterSet:`, ...).
+  - old `WTF::callOnMainThread(void(*)(void*), void*)`: Safari and WebUI bind it from the old
+    JavaScriptCore, whose main-thread caller was never initialized, so calls were dropped
+    (Safari's async policy answer for a new host: cross-host redirects stalled). Hooked to the
+    main queue, taking the new engine's WebThreadLock first (Timer asserts otherwise).
+  Tools: `tests/exclog` (ExcLog tweak: every ObjC throw + uncaught exceptions to
+  `exc-<process>.log`), `toolchain/objc-symbolize.py`, `toolchain/objc-classes.py`.
+- libVLC: `toolchain/prepare-vlc.sh armv7 armv7-ios8` thins MobileVLCKit 3.5.1 (libvlc
+  3.0.18, last release for iOS 8.4; dylib, all newer imports weak) into
+  `prebuilt/armv7-ios8/vlc`, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.
+  `tests/vlc-smoke.c` plays a URL into a vmem buffer and prints fps / libvlc stats.
+  On the iPhone 5: VideoToolbox H.264 720p60, VP8/VP9 360p60 decode in real time, but the
+  vmem path (CVPX copy + chroma conversion, swscale has no NEON bgra path) shows only
+  ~16-27 fps, 720p->RV32 5 fps: frames must stay on the GPU (VLC's GLES2 vout).
+  VLC's https goes through SecureTransport: fails on iOS 8 roots without TLSFix in the
+  process (`DYLD_INSERT_LIBRARIES=.../tlsfix.dylib` for the CLI).
 - JIT inside an app needs the `dynamic-codesigning` entitlement (WPTest is signed with
   `device/entitlements/jsc.xml` on the device); without it JSC silently runs on LLInt
   (fib(27) 241 ms vs 161 ms).

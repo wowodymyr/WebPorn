@@ -1,20 +1,21 @@
 #!/bin/bash
-# Build WebPornSwap.dylib (armv7, iOS 8) and install it as a Substrate tweak.
-#   tweak/build.sh [ssh-host]
+# Build a tweak (armv7, iOS 8) and install it as a Substrate tweak.
+#   [NAME=WebPornSwap|WebPornSafari] tweak/build.sh [ssh-host]
 set -euo pipefail
 WP=$(cd "$(dirname "$0")/.." && pwd)
 HOST=${1:-iphone}
+N=${NAME:-WebPornSwap}
 T=$HOME/theos/toolchain/linux/iphone/bin
 B=$WP/build/tweak
 mkdir -p "$B"
 clang -target armv7-apple-ios8.0 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" -O1 -Wall -Wno-unused-function \
-    -c "$WP/tweak/WebPornSwap.m" -o "$B/WebPornSwap.o"
+    -c "$WP/tweak/$N.m" -o "$B/$N.o"
 clang -target armv7-apple-ios8.0 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" --ld-path="$T/ld" -dynamiclib \
-    -install_name /Library/MobileSubstrate/DynamicLibraries/WebPornSwap.dylib \
-    -framework Foundation -lobjc "$B/WebPornSwap.o" -o "$B/WebPornSwap.dylib"
-"$T/ldid" -S "$B/WebPornSwap.dylib"
+    -install_name /Library/MobileSubstrate/DynamicLibraries/$N.dylib \
+    -framework Foundation -framework UIKit -lobjc "$B/$N.o" -o "$B/$N.dylib" 2>&1 | grep -v "built for iOS Simulator" || true
+"$T/ldid" -S "$B/$N.dylib"
 D=/Library/MobileSubstrate/DynamicLibraries
-scp -q "$B/WebPornSwap.dylib" "$HOST:$D/WebPornSwap.dylib.new"
-scp -q "$WP/tweak/WebPornSwap.plist" "$HOST:$D/WebPornSwap.plist"
-ssh "$HOST" "mv -f $D/WebPornSwap.dylib.new $D/WebPornSwap.dylib"
-echo "installed WebPornSwap on $HOST"
+scp -q "$B/$N.dylib" "$HOST:$D/$N.dylib.new"
+scp -q "$WP/tweak/$N.plist" "$HOST:$D/$N.plist"
+ssh "$HOST" "mv -f $D/$N.dylib.new $D/$N.dylib"
+echo "installed $N on $HOST"

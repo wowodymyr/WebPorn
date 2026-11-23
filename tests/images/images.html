@@ -4,15 +4,25 @@
 <style>img{border:1px solid #888;margin:4px;width:60px;height:45px}</style>
 <div id="imgs"></div>
 <picture><source srcset="t.webp" type="image/webp"><img id="pic" src="t.jpg"></picture>
+<picture><source srcset="t.avif" type="image/avif"><img id="pic2" src="t.jpg"></picture>
 <pre id="log"></pre>
 <script>
-const files = ['t.png','t.jpg','t.gif','t.webp','t-alpha.webp','t.avif'], out = [];
+const files = ['t.png','t.jpg','t.gif','t.webp','t-alpha.webp','t.avif','t-alpha.avif','t-big.avif','t-big.jpg','t-12bit.avif'], out = [];
 let pending = files.length;
-function done() { out.push('picture picked ' + document.getElementById('pic').currentSrc.split('/').pop());
+function decodeTimes() {
+  // drawImage decodes synchronously: the first draw of each big image is its decode time.
+  const c = document.createElement('canvas'); c.width = 1280; c.height = 960; const ctx = c.getContext('2d');
+  for (const f of ['t-big.jpg', 't-big.avif', 't-12bit.avif']) {
+    const img = [...document.images].find(i => i.src.endsWith('/' + f)); const t0 = Date.now();
+    ctx.drawImage(img, 0, 0); out.push(f + ' decode ' + (Date.now() - t0) + 'ms');
+  }
+}
+function done() { decodeTimes(); for (const id of ['pic', 'pic2']) out.push(id + ' picked ' + document.getElementById(id).currentSrc.split('/').pop());
   document.getElementById('log').textContent = out.join('\n'); document.title = out.join(' | '); }
 for (const f of files) {
   const img = new Image();
-  img.onload = () => { out.push(f + ' ok ' + img.naturalWidth + 'x' + img.naturalHeight); if (!--pending) done(); };
+  const t0 = Date.now();
+  img.onload = () => { out.push(f + ' ok ' + img.naturalWidth + 'x' + img.naturalHeight + ' ' + (Date.now() - t0) + 'ms'); if (!--pending) done(); };
   img.onerror = () => { out.push(f + ' ERROR'); if (!--pending) done(); };
   img.src = f; document.getElementById('imgs').appendChild(img);
 }

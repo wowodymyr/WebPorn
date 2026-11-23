@@ -232,6 +232,14 @@ Gotchas found on the way:
   ~16-27 fps, 720p->RV32 5 fps: frames must stay on the GPU (VLC's GLES2 vout).
   VLC's https goes through SecureTransport: fails on iOS 8 roots without TLSFix in the
   process (`DYLD_INSERT_LIBRARIES=.../tlsfix.dylib` for the CLI).
+- Images iOS 8's ImageIO cannot decode go through WebCore's own ScalableImageDecoder:
+  WebP over libwebp (`toolchain/build-libwebp.sh`, `WEBPORN_WEBP_DIR`) and AVIF over
+  dav1d 1.4.3 + decode-only libavif 1.1.1 (`toolchain/build-avif.sh armv7 8.0 iPhoneOS9.3`,
+  `WEBPORN_AVIF_DIR`, `USE_AVIF` on for `WK_IOS_TARGET`; 8/10/12-bit, alpha). AVIF is
+  recognized by the ftyp brand but not advertised (no `image/avif` in Accept or the MIME
+  registry, `<picture>` skips avif sources): a 1280x960 AVIF takes ~190 ms (8-bit) / ~300 ms
+  (12-bit) to decode on the A6, so the JPEG/WebP fallbacks win. `tests/images/images.html`
+  (served by `tests/serve.py`) shows load and decode times.
 - JIT inside an app needs the `dynamic-codesigning` entitlement (WPTest is signed with
   `device/entitlements/jsc.xml` on the device); without it JSC silently runs on LLInt
   (fib(27) 241 ms vs 161 ms).

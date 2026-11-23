@@ -1,0 +1,16 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<!-- The video is behind a cookie (tests/serve.py /private/): plays only when
+     media loads carry the page's cookies. -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline></video>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [];
+function note(s) { log.push(s); document.getElementById('log').textContent = log.join('\n'); document.title = log.join(' | '); }
+for (const e of ['loadedmetadata','playing','ended','error'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(2) + (e=='error' ? ' code=' + (v.error && v.error.code) : '')));
+document.cookie = 'wp=1; path=/';
+v.src = '/private/media/jellyfish-720.mp4';
+</script>

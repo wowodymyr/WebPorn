@@ -15,6 +15,9 @@
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #include <math.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -85,8 +88,11 @@ static void debugLog(const char* format, ...)
 
 // MARK: - Player
 
+typedef struct wpstream wpstream;
+
 struct wpmedia_player {
     wpmedia_client client;
+    wpstream* stream; // wpmedia_open_stream; outlives p until libVLC has stopped
     libvlc_media_player_t* player;
     libvlc_media_t* media;
     void* layer; // WPMediaLayer, retained
@@ -368,6 +374,209 @@ static const libvlc_event_type_t handledEvents[] = { libvlc_MediaPlayerOpening, 
     libvlc_MediaPlayerPlaying, libvlc_MediaPlayerPaused, libvlc_MediaPlayerEndReached, libvlc_MediaPlayerEncounteredError,
     libvlc_MediaPlayerTimeChanged, libvlc_MediaPlayerLengthChanged, libvlc_MediaPlayerESAdded, libvlc_MediaPlayerVout };
 
+// MARK: - Stream input
+
+// What the client delivers for wpmedia_open_stream, read by libVLC's input
+// thread through libvlc_media_new_callbacks. One window of the stream is kept:
+// up to kStreamAhead bytes past the read position (then the client is told to
+// stop and asked to resume later) and kStreamBehind before it, for the small
+// backward seeks demuxers make. A seek outside the window starts a new load at
+// the target (a new generation: data of older loads is dropped).
+
+enum { kStreamAhead = 8 << 20, kStreamResume = 4 << 20, kStreamBehind = 1 << 20, kStreamGap = 256 << 10 };
+
+struct wpstream {
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    void (*request)(void* context, unsigned generation, unsigned long long offset);
+    void* context;
+    uint8_t* bytes;
+    size_t capacity;
+    uint64_t base; // stream offset of bytes[0]
+    size_t length;
+    uint64_t position; // libVLC's read position
+    uint64_t size; // 0: unknown
+    int seekable;
+    unsigned generation;
+    int loading; // the load of this generation is running
+    int ended; // ... and it reached the end of the stream
+    int failed;
+    int closed; // wpmedia_destroy: reads fail, no more requests
+};
+
+// With the lock held. The client only posts the request to its own thread.
+static void streamRequest(wpstream* s, uint64_t offset)
+{
+    if (s->closed || !s->request)
+        return;
+    s->generation++;
+    s->loading = 1;
+    s->ended = 0;
+    s->failed = 0;
+    debugLog("stream request gen %u at %llu", s->generation, (unsigned long long)offset);
+    s->request(s->context, s->generation, offset);
+}
+
+static int streamOpen(void* opaque, void** data, uint64_t* size)
+{
+    wpstream* s = opaque;
+    pthread_mutex_lock(&s->lock);
+    s->position = 0;
+    *size = s->size ? s->size : UINT64_MAX;
+    pthread_mutex_unlock(&s->lock);
+    *data = s;
+    return 0;
+}
+
+static ssize_t streamRead(void* opaque, unsigned char* buffer, size_t length)
+{
+    wpstream* s = opaque;
+    pthread_mutex_lock(&s->lock);
+    ssize_t result;
+    for (;;) {
+        if (s->closed) {
+            result = -1;
+            break;
+        }
+        uint64_t end = s->base + s->length;
+        if (s->position >= s->base && s->position < end) {
+            size_t count = (size_t)MIN((uint64_t)length, end - s->position);
+            memcpy(buffer, s->bytes + (s->position - s->base), count);
+            s->position += count;
+            // Running low after the client was told to stop: resume.
+            if (!s->loading && !s->ended && end - s->position < kStreamResume)
+                streamRequest(s, end);
+            result = count;
+            break;
+        }
+        if (s->position == end && s->ended) {
+            result = 0;
+            break;
+        }
+        if (s->position == end && s->failed) {
+            result = -1;
+            break;
+        }
+        if (s->position < s->base || s->position > end) {
+            if (!s->seekable) {
+                result = -1;
+                break;
+            }
+            s->base = s->position;
+            s->length = 0;
+            streamRequest(s, s->position);
+        } else if (!s->loading)
+            streamRequest(s, end);
+        pthread_cond_wait(&s->changed, &s->lock);
+    }
+    pthread_mutex_unlock(&s->lock);
+    return result;
+}
+
+static int streamSeek(void* opaque, uint64_t offset)
+{
+    wpstream* s = opaque;
+    pthread_mutex_lock(&s->lock);
+    uint64_t end = s->base + s->length;
+    int result = 0;
+    if (offset < s->base || offset > end + (s->loading ? kStreamGap : 0)) {
+        if (s->seekable) {
+            // Out of the window: start over at the target.
+            s->base = offset;
+            s->length = 0;
+            streamRequest(s, offset);
+        } else
+            result = -1;
+    }
+    if (!result)
+        s->position = offset;
+    pthread_mutex_unlock(&s->lock);
+    return result;
+}
+
+static void streamClose(void* opaque)
+{
+}
+
+int wpmedia_stream_data(wpmedia_player* p, unsigned generation, const void* bytes, unsigned long length)
+{
+    wpstream* s = p->stream;
+    if (!s)
+        return 0;
+    pthread_mutex_lock(&s->lock);
+    int keepLoading = 0;
+    if (!s->closed && generation == s->generation && s->loading) {
+        // Drop what is too far behind the reader.
+        if (s->position > s->base + 2 * kStreamBehind && s->position <= s->base + s->length) {
+            size_t drop = (size_t)(s->position - kStreamBehind - s->base);
+            memmove(s->bytes, s->bytes + drop, s->length - drop);
+            s->base += drop;
+            s->length -= drop;
+        }
+        if (s->length + length > s->capacity) {
+            size_t capacity = MAX(s->capacity * 2, s->length + length);
+            uint8_t* grown = realloc(s->bytes, capacity);
+            if (grown) {
+                s->bytes = grown;
+                s->capacity = capacity;
+            }
+        }
+        if (s->length + length <= s->capacity) {
+            memcpy(s->bytes + s->length, bytes, length);
+            s->length += length;
+            pthread_cond_broadcast(&s->changed);
+            keepLoading = s->base + s->length < s->position + kStreamAhead;
+            if (!keepLoading)
+                s->loading = 0; // streamRead resumes it
+        } else {
+            s->failed = 1;
+            s->loading = 0;
+            pthread_cond_broadcast(&s->changed);
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+    return keepLoading;
+}
+
+void wpmedia_stream_end(wpmedia_player* p, unsigned generation, int failed)
+{
+    wpstream* s = p->stream;
+    if (!s)
+        return;
+    pthread_mutex_lock(&s->lock);
+    if (generation == s->generation && s->loading) {
+        s->loading = 0;
+        if (failed)
+            s->failed = 1;
+        else
+            s->ended = 1;
+        debugLog("stream gen %u %s at %llu", generation, failed ? "failed" : "ended", (unsigned long long)(s->base + s->length));
+        pthread_cond_broadcast(&s->changed);
+    }
+    pthread_mutex_unlock(&s->lock);
+}
+
+static wpstream* streamCreate(wpmedia_player* p, unsigned long long size, int seekable)
+{
+    wpstream* s = calloc(1, sizeof(*s));
+    pthread_mutex_init(&s->lock, NULL);
+    pthread_cond_init(&s->changed, NULL);
+    s->request = p->client.stream_request;
+    s->context = p->client.context;
+    s->size = size;
+    s->seekable = seekable && size;
+    s->loading = 1; // the client's first load, generation 0
+    return s;
+}
+
+static void streamDestroy(wpstream* s)
+{
+    pthread_mutex_destroy(&s->lock);
+    pthread_cond_destroy(&s->changed);
+    free(s->bytes);
+    free(s);
+}
+
 // MARK: - Lifetime
 
 wpmedia_player* wpmedia_create(const wpmedia_client* client)
@@ -401,6 +610,15 @@ void wpmedia_destroy(wpmedia_player* p)
     libvlc_event_manager_t* events = libvlc_media_player_event_manager(p->player);
     for (size_t i = 0; i < sizeof(handledEvents) / sizeof(*handledEvents); i++)
         libvlc_event_detach(events, handledEvents[i], handleEvent, p);
+    // A stream read in progress fails now, and no request reaches the client
+    // after this returns.
+    wpstream* stream = p->stream;
+    if (stream) {
+        pthread_mutex_lock(&stream->lock);
+        stream->closed = 1;
+        pthread_cond_broadcast(&stream->changed);
+        pthread_mutex_unlock(&stream->lock);
+    }
     dispatch_queue_t queue = p->queue;
     libvlc_media_player_t* player = p->player;
     libvlc_media_t* media = p->media;
@@ -416,6 +634,8 @@ void wpmedia_destroy(wpmedia_player* p)
         libvlc_media_player_release(player);
         if (media)
             libvlc_media_release(media);
+        if (stream)
+            streamDestroy(stream);
         dispatch_async(dispatch_get_main_queue(), ^{
             [layer.drawable removeFromSuperview];
             [layer.drawable.layer removeFromSuperlayer];
@@ -453,6 +673,8 @@ static int isMP4Family(const char* url, const char* mimeType)
     return 0;
 }
 
+static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType);
+
 void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, const char* userAgent, const char* referrer)
 {
     libvlc_media_t* media = libvlc_media_new_location(sharedInstance(), url);
@@ -460,15 +682,6 @@ void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, cons
         reportState(p, WPMEDIA_STATE_ERROR);
         return;
     }
-    // Pause on the last frame instead of stopping: a stopped input closes the video
-    // output, and replaying or seeking back would set it up again (~2.5 s).
-    libvlc_media_add_option(media, ":play-and-pause");
-    // Adaptive streams (HLS, DASH): libVLC picks renditions the A6 cannot decode in
-    // time (1080p dropped a third of its frames) and that take longest to fetch
-    // after a seek. 720p decodes in real time and is above the iPhone's 640 px width.
-    libvlc_media_add_option(media, ":adaptive-maxheight=720");
-    if (isMP4Family(url, mimeType))
-        libvlc_media_add_option(media, ":demux=avformat,any");
     if (userAgent && *userAgent) {
         char option[1024];
         snprintf(option, sizeof(option), ":http-user-agent=%s", userAgent);
@@ -479,6 +692,36 @@ void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, cons
         snprintf(option, sizeof(option), ":http-referrer=%s", referrer);
         libvlc_media_add_option(media, option);
     }
+    startMedia(p, media, url, mimeType);
+}
+
+void wpmedia_open_stream(wpmedia_player* p, const char* url, const char* mimeType, unsigned long long size, int seekable)
+{
+    if (p->stream) {
+        reportState(p, WPMEDIA_STATE_ERROR);
+        return;
+    }
+    p->stream = streamCreate(p, size, seekable);
+    debugLog("open stream %s (%s) size %llu seekable %d", url, mimeType ? mimeType : "-", size, p->stream->seekable);
+    libvlc_media_t* media = libvlc_media_new_callbacks(sharedInstance(), streamOpen, streamRead, p->stream->seekable ? streamSeek : NULL, streamClose, p->stream);
+    if (!media) {
+        reportState(p, WPMEDIA_STATE_ERROR);
+        return;
+    }
+    startMedia(p, media, url, mimeType);
+}
+
+static void startMedia(wpmedia_player* p, libvlc_media_t* media, const char* url, const char* mimeType)
+{
+    // Pause on the last frame instead of stopping: a stopped input closes the video
+    // output, and replaying or seeking back would set it up again (~2.5 s).
+    libvlc_media_add_option(media, ":play-and-pause");
+    // Adaptive streams (HLS, DASH): libVLC picks renditions the A6 cannot decode in
+    // time (1080p dropped a third of its frames) and that take longest to fetch
+    // after a seek. 720p decodes in real time and is above the iPhone's 640 px width.
+    libvlc_media_add_option(media, ":adaptive-maxheight=720");
+    if (isMP4Family(url, mimeType))
+        libvlc_media_add_option(media, ":demux=avformat,any");
     WPMediaLayer* layer = (__bridge WPMediaLayer*)p->layer;
     libvlc_media_player_t* player = p->player;
     dispatch_async(dispatch_get_main_queue(), ^{

@@ -1,0 +1,24 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<!-- Media through WebCore's loader. stream.html#<url> plays that URL (default
+     jellyfish-720.mp4 next to this page) and seeks to 7 s after 6 s;
+     stream.html#blob plays the same file from a blob: URL. -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline controls></video>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [];
+const t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-12).join(' | '); }
+for (const e of ['loadstart','loadedmetadata','loadeddata','canplay','playing','seeking','seeked','ended','error','stalled','waiting'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(2) + ' d=' + (v.duration||0).toFixed(2) + ' rs=' + v.readyState + (e=='error' ? ' code=' + (v.error && v.error.code) : '')));
+let ticks = 0;
+v.addEventListener('timeupdate', () => { if (++ticks % 8 == 0) note('timeupdate ' + v.currentTime.toFixed(2)); });
+const target = location.hash.slice(1) || 'jellyfish-720.mp4';
+if (target == 'blob') {
+  fetch('jellyfish-720.mp4').then(r => r.blob()).then(b => { note('blob ' + b.size); v.src = URL.createObjectURL(b); });
+} else
+  v.src = target;
+setTimeout(() => { note('seek 7'); v.currentTime = 7; }, 6000);
+</script>

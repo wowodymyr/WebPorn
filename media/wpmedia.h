@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define WPMEDIA_ABI_VERSION 2
+#define WPMEDIA_ABI_VERSION 3
 
 typedef struct wpmedia_player wpmedia_player;
 
@@ -49,6 +49,10 @@ typedef struct {
     // Answer to wpmedia_request_frame: a CGImageRef (+1, the client releases it)
     // or NULL.
     void (*frame_ready)(void* context, void* image);
+    // Stream input (wpmedia_open_stream): load from this byte offset on with this
+    // generation, dropping any load in progress. Called from libVLC's threads,
+    // never after wpmedia_destroy has returned.
+    void (*stream_request)(void* context, unsigned generation, unsigned long long offset);
     // Last call for this client, after every other callback, once the player is
     // torn down (some time after wpmedia_destroy): release the context here.
     void (*release)(void* context);
@@ -73,6 +77,21 @@ void* wpmedia_layer(wpmedia_player*);
 // element's or the response's, without parameters), user_agent and referrer may
 // be NULL.
 void wpmedia_open(wpmedia_player*, const char* url, const char* mime_type, const char* user_agent, const char* referrer);
+
+// Opens a byte stream the client delivers (WebCore's loader, MSE) instead of a
+// URL: libVLC reads what arrives through wpmedia_stream_data. The client has
+// already started loading from offset 0 with generation 0. size: total bytes,
+// 0 when unknown. seekable: the client can load from any offset (HTTP ranges);
+// otherwise the library never asks for anything but the next byte.
+// url only names the stream (logs, the demuxer's guess from an extension).
+void wpmedia_open_stream(wpmedia_player*, const char* url, const char* mime_type, unsigned long long size, int seekable);
+// Bytes of the load with this generation, in order. Returns 0 when the client
+// should stop that load (the buffer is full or the load is stale); the library
+// asks again through stream_request when it needs more.
+int wpmedia_stream_data(wpmedia_player*, unsigned generation, const void* bytes, unsigned long length);
+// The load with this generation is over: at the end of the stream, or failed.
+void wpmedia_stream_end(wpmedia_player*, unsigned generation, int failed);
+
 void wpmedia_play(wpmedia_player*);
 void wpmedia_pause(wpmedia_player*);
 void wpmedia_seek(wpmedia_player*, double seconds);

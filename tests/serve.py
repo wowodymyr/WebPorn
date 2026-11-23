@@ -2,12 +2,19 @@
 """Static file server with HTTP Range support (media seeking) for the device tests.
 
   tests/serve.py [port=8765] [bind=0.0.0.0]      serves tests/
-python's http.server ignores Range, so libVLC cannot seek in what it serves."""
+python's http.server ignores Range, so libVLC cannot seek in what it serves.
+Paths under /private/ need the cookie wp=1 (403 otherwise): media loads must
+carry the page's cookies."""
 import http.server, os, re, sys
 
 
 class RangeHandler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
+        if self.path.startswith("/private/"):
+            if "wp=1" not in self.headers.get("Cookie", ""):
+                self.send_error(403)
+                return None
+            self.path = self.path[len("/private"):]
         path = self.translate_path(self.path)
         match = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range", ""))
         if not match or not os.path.isfile(path):

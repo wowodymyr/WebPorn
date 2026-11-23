@@ -221,8 +221,14 @@ Gotchas found on the way:
   AVKit (`-[UIWindow windowScene]`). `tests/media/video.html` logs the media events (WPTest,
   `capture-delay.txt`); Safari plays after a tap. VNC (Veency) shows the libVLC GL layer full
   screen; the real screen / in-app capture is right. Known: control icons missing (square play
-  glyph), seek requested before preroll lands late, no cookies / CORS for media (libVLC fetches
-  itself; TLSFix makes its https work), `paint()` empty (canvas drawImage(video)), no MSE.
+  glyph), seek requested before preroll lands late, `paint()` empty (canvas drawImage(video)), no MSE.
+  Media bytes come from WebCore's loader (ABI 3 stream input: `wpmedia_open_stream` /
+  `stream_data` / `stream_request` over `libvlc_media_new_callbacks`): cookies, CORS, blob: and
+  data: URLs work. libVLC reads from an 8 MB window (1 MB kept behind); a seek outside it makes
+  the library ask for a new HTTP range (a new generation; stale data is dropped). HLS and file:
+  still go to libVLC by URL, and so does everything with `/var/webporn/media-direct`.
+  Tests: `tests/media/stream.html` (`#<url>`, `#blob`), `tests/media/cookie.html`
+  (`tests/serve.py` serves `/private/` only with the cookie `wp=1`).
 - libVLC: `toolchain/prepare-vlc.sh armv7 armv7-ios8` thins MobileVLCKit 3.5.1 (libvlc
   3.0.18, last release for iOS 8.4; dylib, all newer imports weak) into
   `prebuilt/armv7-ios8/vlc`, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.

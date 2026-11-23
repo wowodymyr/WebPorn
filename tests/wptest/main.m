@@ -1,6 +1,7 @@
 // WPTest: a UIWebView test app. Loads /var/mobile/Media/webporn/url.txt (a URL)
 // or test.html from that directory, then writes result.txt (JS probes) and
-// screenshot.png there. Launch with `uiopen wptest:`.
+// screenshot.png there (capture-delay.txt seconds after the load, default 2).
+// Launch with `uiopen wptest:`.
 #import <UIKit/UIKit.h>
 
 static NSString *const kDir = @"/var/mobile/Media/webporn";
@@ -26,6 +27,9 @@ static NSString *const kProbe =
     self.webView = [[UIWebView alloc] initWithFrame:controller.view.bounds];
     self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.webView.delegate = self;
+    // Media tests (tests/media): play inline and without a tap, like a desktop page.
+    self.webView.allowsInlineMediaPlayback = YES;
+    self.webView.mediaPlaybackRequiresUserAction = NO;
     [controller.view addSubview:self.webView];
     self.window.rootViewController = controller;
     [self.window makeKeyAndVisible];
@@ -49,7 +53,9 @@ static NSString *const kProbe =
     if (webView.isLoading)
         return;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(capture) object:nil];
-    [self performSelector:@selector(capture) withObject:nil afterDelay:2];
+    // capture-delay.txt: seconds to wait after the load (media tests need longer).
+    double delay = [[NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"capture-delay.txt"] encoding:NSUTF8StringEncoding error:nil] doubleValue];
+    [self performSelector:@selector(capture) withObject:nil afterDelay:delay > 0 ? delay : 2];
 }
 
 - (void)webView:(UIWebView *)webView didFailLoadWithError:(NSError *)error

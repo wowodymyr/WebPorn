@@ -203,6 +203,26 @@ Gotchas found on the way:
     main queue, taking the new engine's WebThreadLock first (Timer asserts otherwise).
   Tools: `tests/exclog` (ExcLog tweak: every ObjC throw + uncaught exceptions to
   `exc-<process>.log`), `toolchain/objc-symbolize.py`, `toolchain/objc-classes.py`.
+- Media engine (`<video>` / `<audio>` on libVLC): `media/wpmedia.h` is a C ABI;
+  `media/wpmedia.m` -> `/var/webporn/lib/libWebPornMedia.dylib` (`media/build.sh`) implements it
+  over MobileVLCKit's libvlc; WebCore's `platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm`
+  dlopens it and registers (as the HolePunch engine identity, unused in this build) only when it
+  loads. Video uses libVLC's own iOS output (VideoToolbox, OpenGL ES view) inside a CALayer that
+  is the engine's platform layer: H.264 720p/1080p30, VP8/VP9 720p in real time on the A6
+  (`tests/vlcview`: VLCView app, `run.sh <url>`; `vlc-mode.txt` = wpmedia drives the library).
+  Details that matter: preroll (open muted and playing, pause back at 0 once the video output
+  exists: setting it up takes ~2.5 s, and with `:start-paused` it only starts on play);
+  `:play-and-pause` (keep the output at the end; an unrequested pause at the end = ENDED);
+  `:demux=avformat,any` for mp4 (libVLC's mp4 demuxer froze the clock at 0.25 s on a
+  video-only file with an edit list); views created asynchronously on the main thread and stop
+  on a background queue (the WebThread may hold the web lock while the main thread waits).
+  WebCore: video always plays inline on WK26 (`requiresFullscreenForVideoPlayback` false,
+  `enterFullscreen` refused without player support): the WebKit1 fullscreen path needs iOS 13
+  AVKit (`-[UIWindow windowScene]`). `tests/media/video.html` logs the media events (WPTest,
+  `capture-delay.txt`); Safari plays after a tap. VNC (Veency) shows the libVLC GL layer full
+  screen; the real screen / in-app capture is right. Known: control icons missing (square play
+  glyph), seek requested before preroll lands late, no cookies / CORS for media (libVLC fetches
+  itself; TLSFix makes its https work), `paint()` empty (canvas drawImage(video)), no MSE.
 - libVLC: `toolchain/prepare-vlc.sh armv7 armv7-ios8` thins MobileVLCKit 3.5.1 (libvlc
   3.0.18, last release for iOS 8.4; dylib, all newer imports weak) into
   `prebuilt/armv7-ios8/vlc`, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.

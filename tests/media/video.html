@@ -1,0 +1,17 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline controls src="http://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4"></video>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [];
+const t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-12).join(' | '); }
+note('canPlayType mp4 ' + v.canPlayType('video/mp4; codecs="avc1.42E01E"') + ', webm vp9 ' + v.canPlayType('video/webm; codecs="vp9"'));
+for (const e of ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','seeking','seeked','ended','error','stalled','waiting'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(2) + ' d=' + (v.duration||0).toFixed(2) + ' rs=' + v.readyState + (e=='error' ? ' code=' + (v.error && v.error.code) : '')));
+let ticks = 0;
+v.addEventListener('timeupdate', () => { if (++ticks % 8 == 0) note('timeupdate ' + v.currentTime.toFixed(2)); });
+setTimeout(() => { note('seek 7'); v.currentTime = 7; }, 6000);
+</script>

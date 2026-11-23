@@ -109,8 +109,14 @@ int main(int argc, char** argv)
     double start = now();
     libvlc_media_player_play(player);
     double firstFrame = 0;
+    double lastReport = 0;
     while (!ended && now() - start < seconds) {
         usleep(50000);
+        if (getenv("TIMES") && now() - lastReport >= 1) {
+            lastReport = now();
+            printf("t=%.1f get_time %lld ms, position %.3f x length %lld ms\n", now() - start, (long long)libvlc_media_player_get_time(player),
+                libvlc_media_player_get_position(player), (long long)libvlc_media_player_get_length(player));
+        }
         if (!firstFrame && frames)
             firstFrame = now() - start;
     }

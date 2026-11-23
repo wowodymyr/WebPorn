@@ -67,7 +67,9 @@ static NSString *const kProbe =
 
 - (void)capture
 {
-    NSString *result = [self.webView stringByEvaluatingJavaScriptFromString:kProbe];
+    // probe.js, when present, replaces the built-in probe (any expression yielding a string).
+    NSString *probe = [NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"probe.js"] encoding:NSUTF8StringEncoding error:nil] ?: kProbe;
+    NSString *result = [self.webView stringByEvaluatingJavaScriptFromString:probe];
     [result writeToFile:[kDir stringByAppendingPathComponent:@"result.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     UIGraphicsBeginImageContextWithOptions(self.window.bounds.size, YES, 0);
     [self.window drawViewHierarchyInRect:self.window.bounds afterScreenUpdates:YES];

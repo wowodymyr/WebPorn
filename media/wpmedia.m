@@ -353,7 +353,6 @@ wpmedia_player* wpmedia_create(const wpmedia_client* client)
     p->volume = 1;
     p->rate = 1;
     WPMediaLayer* layer = [WPMediaLayer layer];
-    layer.backgroundColor = [UIColor blackColor].CGColor;
     layer.masksToBounds = YES;
     p->layer = (__bridge_retained void*)layer;
     libvlc_event_manager_t* events = libvlc_media_player_event_manager(p->player);
@@ -444,7 +443,9 @@ void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, cons
     libvlc_media_player_t* player = p->player;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIView* drawable = [[UIView alloc] initWithFrame:layer.bounds];
-        drawable.backgroundColor = [UIColor blackColor];
+        // Transparent: the poster shows through until libVLC's view draws, and
+        // nothing black is left when the media never loads.
+        drawable.backgroundColor = [UIColor clearColor];
         drawable.userInteractionEnabled = NO;
         drawable.clipsToBounds = YES;
         layer.drawable = drawable;

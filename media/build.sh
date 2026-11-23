@@ -15,7 +15,7 @@ clang -target armv7-apple-ios8.4 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" -O2 -Wall 
     -I"$VLC/Headers" -c "$WP/media/wpmedia.m" -o "$B/wpmedia.o"
 clang -target armv7-apple-ios8.4 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" --ld-path="$T/ld" -dynamiclib \
     -install_name /var/webporn/lib/libWebPornMedia.dylib -exported_symbols_list "$WP/media/exports.txt" \
-    -framework UIKit -framework QuartzCore -framework Foundation "$VLC/MobileVLCKit" "$B/wpmedia.o" \
+    -framework UIKit -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework Foundation "$VLC/MobileVLCKit" "$B/wpmedia.o" \
     -o "$B/libWebPornMedia.dylib" 2>&1 | grep -v "built for iOS Simulator" || true
 [ "${INSTALL:-1}" = 1 ] || exit 0
 scp -q "$B/libWebPornMedia.dylib" "$HOST:/var/webporn/lib/libWebPornMedia.dylib.new"

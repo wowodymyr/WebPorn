@@ -1,0 +1,23 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>canvas</title>
+<style>body{font:12px sans-serif;margin:8px} video,canvas{width:150px;border:1px solid #888}</style>
+<video id="v" muted autoplay playsinline src="jellyfish-720.mp4"></video>
+<canvas id="c" width="320" height="180"></canvas>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), c = document.getElementById('c'), g = c.getContext('2d'), log = [];
+const t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.join(' | '); }
+function grab(why) { try {
+  const s = performance.now();
+  g.drawImage(v, 0, 0, 320, 180);
+  const ms = (performance.now() - s).toFixed(0);
+  const d = g.getImageData(0, 0, 320, 180).data; let sum = 0;
+  for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+  note(why + ' t=' + v.currentTime.toFixed(1) + ' drawImage ' + ms + ' ms, mean ' + (sum / (d.length / 4) / 3).toFixed(1));
+  } catch (e) { note(why + " error " + e); }
+}
+v.addEventListener('loadeddata', () => grab('loadeddata'));
+let n = 0; const timer = setInterval(() => { if (!v.paused) grab('playing'); if (++n > 4) clearInterval(timer); }, 2000);
+</script>

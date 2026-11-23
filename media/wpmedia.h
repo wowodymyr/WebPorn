@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define WPMEDIA_ABI_VERSION 1
+#define WPMEDIA_ABI_VERSION 2
 
 typedef struct wpmedia_player wpmedia_player;
 
@@ -46,6 +46,12 @@ typedef struct {
     void (*buffering)(void* context, float percent);
     // A first video frame is on screen.
     void (*first_frame)(void* context);
+    // Answer to wpmedia_request_frame: a CGImageRef (+1, the client releases it)
+    // or NULL.
+    void (*frame_ready)(void* context, void* image);
+    // Last call for this client, after every other callback, once the player is
+    // torn down (some time after wpmedia_destroy): release the context here.
+    void (*release)(void* context);
 } wpmedia_client;
 
 int wpmedia_abi_version(void);
@@ -54,7 +60,8 @@ int wpmedia_abi_version(void);
 // parameter or NULL / "".
 wpmedia_support wpmedia_supports(const char* container, const char* codecs);
 
-// The client is copied; its callbacks run until wpmedia_destroy returns.
+// The client is copied. Callbacks may still arrive after wpmedia_destroy returns,
+// up to client.release.
 wpmedia_player* wpmedia_create(const wpmedia_client*);
 void wpmedia_destroy(wpmedia_player*);
 
@@ -73,6 +80,13 @@ double wpmedia_time(wpmedia_player*);
 void wpmedia_set_rate(wpmedia_player*, float rate);
 void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
 void wpmedia_set_muted(wpmedia_player*, int muted);
+
+// The current video frame as a CGImageRef (+1, the caller releases it), at most
+// max_width pixels wide, or NULL. Blocks for a few hundred milliseconds
+// (libVLC's snapshot: the frame is read back from the GPU); cache it.
+void* wpmedia_copy_frame(wpmedia_player*, unsigned max_width);
+// The same, without blocking: the frame arrives through frame_ready.
+void wpmedia_request_frame(wpmedia_player*, unsigned max_width);
 
 #ifdef __cplusplus
 }

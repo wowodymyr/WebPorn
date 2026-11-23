@@ -113,6 +113,40 @@ static void onFirstFrame(void* context) { logEvent(@"first frame"); }
     open(player, url.UTF8String, NULL, "WPTest", NULL);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ logEvent(@"-> play"); play(player); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ logEvent(@"-> seek 5"); seek(player, 5); });
+    // Snapshot cost (libvlc_video_take_snapshot through the library's player is not
+    // exported, so time it on a second libvlc player opened on the same URL).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+        libvlc_media_player_t* (*rawPlayer)(wpmedia_player*) = dlsym(library, "wpmedia_debug_vlc_player");
+        if (!rawPlayer) { logEvent(@"no wpmedia_debug_vlc_player"); return; }
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            CALayer* host = (__bridge CALayer*)layerOf(player);
+            UIView* drawable = [host valueForKey:@"drawable"];
+            for (int i = 0; i < 3; i++) {
+                CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+                CGSize size = drawable.bounds.size;
+                UIGraphicsBeginImageContextWithOptions(size, YES, 1);
+                BOOL ok = [drawable drawViewHierarchyInRect:drawable.bounds afterScreenUpdates:NO];
+                UIImage* image = UIGraphicsGetImageFromCurrentImageContext();
+                UIGraphicsEndImageContext();
+                CGImageRef cg = image.CGImage;
+                // Mean of the first row's bytes, to tell black from a real frame.
+                CFDataRef data = CGDataProviderCopyData(CGImageGetDataProvider(cg));
+                const UInt8* bytes = CFDataGetBytePtr(data);
+                unsigned long sum = 0, n = CFDataGetLength(data);
+                for (unsigned long k = 0; k < n; k += 97) sum += bytes[k];
+                CFRelease(data);
+                logEvent([NSString stringWithFormat:@"drawViewHierarchy %d: ok %d, %.0f ms, %zux%zu, mean %.1f", i, ok,
+                    (CFAbsoluteTimeGetCurrent() - start) * 1000, CGImageGetWidth(cg), CGImageGetHeight(cg), (double)sum / (n / 97)]);
+            }
+        });
+        for (int i = 0; i < 3; i++) {
+            NSString* path = [NSString stringWithFormat:@"%@/snap%d.png", kDir, i];
+            CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+            int rc = libvlc_video_take_snapshot(rawPlayer(player), 0, path.UTF8String, 320, 0);
+            NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+            logEvent([NSString stringWithFormat:@"snapshot %d: rc %d, %.0f ms, %llu bytes", i, rc, (CFAbsoluteTimeGetCurrent() - start) * 1000, attributes.fileSize]);
+        }
+    });
 }
 
 - (void)report

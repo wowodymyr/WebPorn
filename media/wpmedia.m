@@ -11,6 +11,7 @@
 // (libVLC's video output closes with a dispatch_sync to the main queue) runs on
 // a background queue.
 
+#import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #include <math.h>
@@ -374,7 +375,8 @@ void wpmedia_destroy(wpmedia_player* p)
 {
     if (!p)
         return;
-    // Detaching waits for a callback in progress; none run after this.
+    // Detaching waits for a callback in progress; no event callback runs after
+    // this, but work already on p->queue does (see client.release).
     libvlc_event_manager_t* events = libvlc_media_player_event_manager(p->player);
     for (size_t i = 0; i < sizeof(handledEvents) / sizeof(*handledEvents); i++)
         libvlc_event_detach(events, handledEvents[i], handleEvent, p);
@@ -382,8 +384,12 @@ void wpmedia_destroy(wpmedia_player* p)
     libvlc_media_player_t* player = p->player;
     libvlc_media_t* media = p->media;
     WPMediaLayer* layer = (__bridge_transfer WPMediaLayer*)p->layer;
-    // Queued metadata work still uses p: free it behind that work.
-    dispatch_async(queue, ^{ free(p); });
+    // Queued work still uses p and the client: release both behind it.
+    dispatch_async(queue, ^{
+        if (p->client.release)
+            p->client.release(p->client.context);
+        free(p);
+    });
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         libvlc_media_player_stop(player);
         libvlc_media_player_release(player);
@@ -532,4 +538,48 @@ void wpmedia_set_muted(wpmedia_player* p, int muted)
         if (p->ready)
             libvlc_audio_set_volume(p->player, muted ? 0 : (int)(p->volume * 100));
     });
+}
+
+// MARK: - Frames
+
+// libVLC has no in-memory snapshot: it converts the displayed picture and writes
+// a file, which is read back here. Video output frames live on the GPU, so this
+// is the only CPU copy there is (~250 ms on an A6).
+void* wpmedia_copy_frame(wpmedia_player* p, unsigned maxWidth)
+{
+    if (!p->ready || !p->width)
+        return NULL;
+    unsigned width = p->width < maxWidth || !maxWidth ? p->width : maxWidth;
+    NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"wpmedia-frame-%p.png", p]];
+    if (libvlc_video_take_snapshot(p->player, 0, path.fileSystemRepresentation, width, 0))
+        return NULL;
+    CGImageRef image = NULL;
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
+    if (source) {
+        // Decode now: the file goes away below.
+        NSDictionary* options = @{ (__bridge NSString*)kCGImageSourceShouldCacheImmediately: @YES };
+        image = CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+        CFRelease(source);
+    }
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    debugLog("copy_frame %ux: %s", width, image ? "ok" : "failed");
+    return image;
+}
+
+void wpmedia_request_frame(wpmedia_player* p, unsigned maxWidth)
+{
+    // On the player's queue, which wpmedia_destroy waits for before freeing p.
+    dispatch_async(p->queue, ^{
+        void* image = wpmedia_copy_frame(p, maxWidth);
+        if (p->client.frame_ready)
+            p->client.frame_ready(p->client.context, image);
+        else if (image)
+            CFRelease(image);
+    });
+}
+
+// Test hook (tests/vlcview): the libVLC player behind a wpmedia player.
+libvlc_media_player_t* wpmedia_debug_vlc_player(wpmedia_player* p)
+{
+    return p->player;
 }

@@ -8,3 +8,4 @@ __pycache__/
 /device/*
 !/device/entitlements/
 !/device/*.sh
+jellyfish-720.mp4

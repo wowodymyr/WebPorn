@@ -11,7 +11,7 @@ rm -rf "$B"; mkdir -p "$B"
 clang -target armv7-apple-ios8.4 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" -O1 -fobjc-arc -I"$VLC/Headers" \
     -c "$WP/tests/vlcview/main.m" -o "$B/../main.o"
 clang -target armv7-apple-ios8.4 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" --ld-path="$T/ld" \
-    -framework UIKit -framework Foundation "$VLC/MobileVLCKit" "$B/../main.o" -o "$B/VLCView" 2>&1 | grep -v "built for iOS Simulator" || true
+    -framework UIKit -framework Foundation -framework CoreGraphics "$VLC/MobileVLCKit" "$B/../main.o" -o "$B/VLCView" 2>&1 | grep -v "built for iOS Simulator" || true
 cp "$WP/tests/vlcview/Info.plist" "$B/"
 ssh "$HOST" 'rm -rf /Applications/VLCView.app.new'
 scp -O -qr "$B" "$HOST:/Applications/VLCView.app.new"

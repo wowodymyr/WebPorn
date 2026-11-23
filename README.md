@@ -51,9 +51,30 @@ Builds run inside the `ubuntu` toolbox (Ubuntu 26.04).
 ## WebKit
 
 `toolchain/configure-webkit.sh <arch> <min> <sdk> [cmake args]` configures
-`src/webkit` into `build/webkit-<arch>-ios<N>` (CMake Mac port, `WK_IOS_TARGET=ON`).
-JSC-only: `-DENABLE_WEBCORE=OFF -DENABLE_WEBKIT_LEGACY=OFF -DENABLE_WEBKIT=OFF
--DDEVELOPER_MODE=ON -DENABLE_XSLT=OFF -DENABLE_WEBGL=OFF`, then `ninja jsc`.
+`src/webkit` into `build/webkit-<arch>-ios<N>` (CMake Mac port, `WK_IOS_TARGET=ON`,
+fatal warnings off — the Web Port diff is not -Werror clean). Build WebKit against a
+new SDK, as Web Port did (iPhoneOS16.5 for armv7); the prebuilt runtimes stay on 9.3/10.3.
+
+JSC-only (works on the iPhone 5, JIT + DFG):
+
+```sh
+toolchain/configure-webkit.sh armv7 8.0 iPhoneOS16.5 -DENABLE_WEBCORE=OFF \
+    -DENABLE_WEBKIT_LEGACY=OFF -DENABLE_WEBKIT=OFF -DDEVELOPER_MODE=ON \
+    -DENABLE_XSLT=OFF -DENABLE_WEBGL=OFF -DENABLE_WEB_RTC=OFF
+ninja -C build/webkit-armv7-ios8 jsc
+device/deploy-jsc.sh armv7-ios8 iphone
+```
+
+What the `webporn` branch adds on top of the Web Port diff:
+- armv7 iOS gets JIT/DFG + bmalloc (`WebKitFeatures.cmake`), no WebAssembly
+- `WK26_IOS_TARGET` / `WK26_ENGINE_DIAG` defined, the diff's missing `WK26_DATALOG`/
+  `WK26_WTFLOG`/`WK26_ENGINE_FLAG` stubbed out (`OptionsMac.cmake`)
+- offlineasm ARM: LLInt label addresses and label differences via inline `.long`
+  literals (Darwin `.indirect_symbol` needs non-local symbols; LLVM limits movw/movt
+  addends to 16 bits)
+- memory pressure source falls back to the pre-iOS 10 flag mask
+- `libwpcxxcompat.a` is linked hidden into every image (`WEBPORN_COMPAT_A`); it also
+  carries iOS 10 libSystem calls (`os_log`, `mach_continuous_time`, `mkostemp`, dyld SPI)
 
 ## Device
 
@@ -62,11 +83,100 @@ Engine files go to `/var/webporn/` (iPhone 5 root fs has ~565 MB free).
 (`toolchain/dsc-exports.py`); pass it to `check-undefs.py` instead of an SDK.
 SSH host alias `iphone` (iPhone 5, iOS 8.4.1) is in `~/.ssh/config`.
 
+- JIT needs the `dynamic-codesigning` entitlement (`device/entitlements/jsc.xml`). iOS 8
+  kills binaries whose entitlements were signed by the host ldid, so `deploy-jsc.sh`
+  signs `jsc` with the device's own ldid.
+- No debugger on the phone: `tests/crashprobe.c` built as a dylib and loaded with
+  `DYLD_INSERT_LIBRARIES` prints registers and a symbolized backtrace on a crash.
+
 `toolchain/check-undefs.py <sdk> <macho>` lists undefined symbols the SDK's .tbd
 files do not export. For armv7 the 9.3 SDK is newer than the iOS 8.4.1 devices, so
 a clean result there is necessary but not sufficient.
+
+With the device's `exports.tsv` plus our own JSC/WebCore exports and `prebuilt/<tag>/stubs`
+it is exact: WebCore and WebKitLegacy for armv7-ios8 have 0 unresolved symbols
+(`device/iphone5-8.4.1/missing-*.txt`). The 105 newer CoreText/CG/CommonCrypto/Security
+entry points are implemented in `toolchain/compat/webcore_ios8_compat.{c,m}` (older API
+where one exists — CTFontTransformGlyphs for shaping, CTFontCreateForStringWithLanguage
+for fallback, HKDF over CCHmac, conic gradients drawn as wedges — otherwise failing the
+way the WK26 call sites expect); iOS 10 libSystem calls are in `system_compat.c`. The
+compat archive is not a ninja dependency: after rebuilding it, delete the WebCore and
+WebKitLegacy binaries to force a relink.
+
+`toolchain/objc-selector-audit.py <cache> <macho>...` lists selectors the Mach-Os send
+that no class or category in the shared cache implements — unrecognized-selector
+crashes the linker cannot see. The phone's cache copy was taken from memory and has
+some pointers slid by 0x3a74000; the script copes. Result for armv7-ios8:
+`device/iphone5-8.4.1/missing-selectors.tsv` (lib, selector, source files), still to be
+triaged; many are behind respondsToSelector:, informal protocols, or media/PiP code that
+is unreachable without the iOS 9+ classes. Shimmed so far (runtime class_addMethod in
+webcore_ios8_compat.m): -[NSHTTPCookie sameSitePolicy], -[NSProcessInfo
+isLowPowerModeEnabled/thermalState].
 
 ```sh
 toolchain/build-libcxx.sh arm64 10.0 iPhoneOS10.3 && toolchain/build-compat.sh arm64 10.0 iPhoneOS10.3
 toolchain/build-libcxx.sh armv7 8.0  iPhoneOS9.3  && toolchain/build-compat.sh armv7 8.0  iPhoneOS9.3
 ```
+
+## Running the engine on the device (armv7, iPhone 5 / iOS 8.4.1)
+
+Status 2026-11-23: a stock UIWebView app (`tests/wptest`) runs WebPorn after the
+in-process engine swap; modern sites (en.m.wikipedia.org) load over TLSFix.
+Screenshots: `device/iphone5-8.4.1/results/`.
+
+```sh
+device/deploy-webkit.sh armv7-ios8 iphone   # JSC + WebCore + WebKitLegacy -> /var/webporn/lib
+tweak/build.sh                             # WebPornSwap.dylib (Substrate, filter: net.webporn.wptest)
+tweak/build-tlsfix.sh                      # TLSFix + OpenSSL 1.1.1w (toolchain/build-openssl.sh), same filter
+tests/wptest/build.sh                      # WPTest.app; `uiopen wptest:` on the device
+device/last-crash.py WPTest                # newest crash report, WebPorn frames symbolized
+```
+
+WPTest loads `/var/mobile/Media/webporn/url.txt` (or `test.html`) and writes
+`result.txt` (JS probes), `screenshot.png` and `error.txt` there. Headless tests
+without UIKit: `tests/webview-smoke.m` (WebView + JS + PNG via `_drawRect:`),
+`tests/dlopen-test.c` (RTLD_NOW load of each framework).
+
+`tweak/WebPornSwap.m` follows ref/engine-swap.md on iOS 8: class names via
+NXMapInsert into gdb_objc_realized_classes; dlopen; rebind every bind / weak / lazy
+slot into the old images (only UIKit has any at launch, 101; DataDetectorsUI,
+CorePDF and QuickLook load later and are rebound from the add-image callback);
+dlsym hooked instead of individual soft-linked functions; UIKit's ~40 categories on
+DOM/WebFrame classes re-attached. `/var/webporn/swap-dryrun` = log only
+(`/var/mobile/Media/webporn/swap.log`). Lookups use RTLD_FIRST handles: a plain
+handle also searches the image's dependencies, which include the old engine via UIKit.
+
+Gotchas found on the way:
+- iOS 8 `class_copyMethodList` / `class_addMethod` do not realize the class; call
+  `class_respondsToSelector` first. 32-bit `class_t.bits` data mask is `~3`.
+- Unrecognized selectors are the main runtime failure. `toolchain/objc-selector-audit.py
+  device/iphone5-8.4.1/selectors.txt <machos>` lists selectors no iOS 8 class implements
+  (`selectors.txt` is ground truth from `tests/objc-methods.m` run on the phone), but
+  it cannot see class/receiver mismatches (`+[UIApplication _classicMode]` exists only as
+  an instance method; `CADisplayLink.preferredFramesPerSecond` is implemented by other
+  classes). An ObjC exception that unwinds through WebCore's -fno-exceptions frames
+  leaves locks held: a hang (DisplayRefreshMonitor), not a crash. Shims:
+  `toolchain/compat/webcore_ios8_compat.m` (table applied per loaded image).
+- iOS 8 MobileGestalt aborts on unknown questions; WebCore's MG calls go through
+  allowlisting wrappers in webcore_ios8_compat.c.
+- Overwriting a signed binary in place on iOS 8 gets the next exec SIGKILLed; copy to
+  a new name and `mv`.
+- `killall -SEGV <app>` makes CrashReporter write all thread stacks of a hung app.
+- uutils `sort -u` (coreutils 0.8.0 here) silently drops lines; dedupe with Python.
+- Hard soft-links (`SOFT_LINK*` without OPTIONAL / MAY_FAIL) RELEASE_ASSERT when the OS
+  lacks the symbol. `toolchain/softlink-audit.py device/iphone5-8.4.1/exports.tsv src/webkit
+  <machos>` lists the ones linked into our binaries (names come from the
+  `__TEXT,__dlsym_cstr` / `__getClass_cstr` sections) that iOS 8 cannot satisfy: 171
+  (CoreMedia 81, AVFoundation 27, UIFoundation 23, MediaRemote, OTSVG, DataDetectors...).
+  For WK26_IOS_TARGET C++ sources, `WTF/wtf/cocoa/SoftLinking.h` now degrades a missing
+  framework / function / constant / pointer / class to a logged no-op returning zero
+  (`WTF::softLinkStub`, `softLinkZero`) instead of crashing (MediaRemote's
+  MRMediaRemoteSetSupportedCommands crashed bbc.com).
+- The AVFoundation media engine does not work on iOS 8 (`createAVAssetForURL` puts
+  AVURLAsset option keys that are nil there into a dictionary, uses resourceLoader SPI
+  from later releases: bbc.com threw). Until libWebPornMedia exists the tweak turns it
+  off by putting `WebKitAVFoundationEnabled = NO` into the NSUserDefaults argument
+  domain (no `<video>` engine at all); `/var/webporn/use-avfoundation` keeps it on.
+- JIT inside an app needs the `dynamic-codesigning` entitlement (WPTest is signed with
+  `device/entitlements/jsc.xml` on the device); without it JSC silently runs on LLInt
+  (fib(27) 241 ms vs 161 ms).

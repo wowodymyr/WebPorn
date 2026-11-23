@@ -3,4 +3,7 @@
 /prebuilt/
 /sdks/*
 !/sdks/LOCAL-CHANGES.md
-/device/
+__pycache__/
+!/device/
+/device/*
+!/device/entitlements/

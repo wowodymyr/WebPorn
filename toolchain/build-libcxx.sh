@@ -19,3 +19,5 @@ cmake -G Ninja -S "$WP/src/llvm-project/runtimes" -B "$B" \
     -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_TESTS=OFF \
     > "$B.configure.log"
 ninja -C "$B" install
+# system-libcxxabi does not install the ABI headers; WTF includes <cxxabi.h> (__cxa_demangle).
+cp "$WP/src/llvm-project/libcxxabi/include/"{cxxabi.h,__cxxabi_config.h} "$WP/prebuilt/$TAG/libcxx/include/c++/v1/"

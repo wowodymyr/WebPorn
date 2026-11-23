@@ -108,7 +108,7 @@ static libvlc_instance_t* sharedInstance(void)
     static libvlc_instance_t* instance;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        const char* args[] = { "--no-video-title-show", "--no-stats", "--network-caching=1000" };
+        const char* args[] = { "--no-video-title-show", "--network-caching=1000" };
         instance = libvlc_new(sizeof(args) / sizeof(*args), args);
     });
     return instance;
@@ -285,6 +285,15 @@ static void handleEvent(const libvlc_event_t* event, void* data)
     case libvlc_MediaPlayerTimeChanged: {
         double seconds = event->u.media_player_time_changed.new_time / 1000.0;
         dispatch_async(p->queue, ^{
+            static CFAbsoluteTime lastStats;
+            if (p->media && CFAbsoluteTimeGetCurrent() - lastStats > 5) {
+                lastStats = CFAbsoluteTimeGetCurrent();
+                libvlc_media_stats_t stats = { };
+                libvlc_media_get_stats(p->media, &stats);
+                debugLog("stats: video decoded %d displayed %d lost %d, audio decoded %d played %d lost %d, volume %d",
+                    stats.i_decoded_video, stats.i_displayed_pictures, stats.i_lost_pictures, stats.i_decoded_audio,
+                    stats.i_played_abuffers, stats.i_lost_abuffers, libvlc_audio_get_volume(p->player));
+            }
             debugLog("time %.2f ready %d seekTarget %.2f", seconds, p->ready, p->seekTarget);
             if (!p->ready) {
                 // Audio only: no video output will come.

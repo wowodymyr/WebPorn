@@ -104,6 +104,24 @@ struct wpmedia_player {
     int hasVideo, hasAudio;
 };
 
+static void vlcLog(void* data, int level, const libvlc_log_t* context, const char* format, va_list args)
+{
+    static FILE* file;
+    static CFAbsoluteTime start;
+    if (!file) {
+        file = fopen("/var/mobile/Media/webporn/wpmedia-vlc.log", "w");
+        start = CFAbsoluteTimeGetCurrent();
+    }
+    if (!file || level < LIBVLC_NOTICE - 1)
+        return;
+    const char* module = NULL;
+    libvlc_log_get_context(context, &module, NULL, NULL);
+    fprintf(file, "%7.3f [%s] ", CFAbsoluteTimeGetCurrent() - start, module ? module : "?");
+    vfprintf(file, format, args);
+    fputc('\n', file);
+    fflush(file);
+}
+
 static libvlc_instance_t* sharedInstance(void)
 {
     static libvlc_instance_t* instance;
@@ -111,6 +129,9 @@ static libvlc_instance_t* sharedInstance(void)
     dispatch_once(&once, ^{
         const char* args[] = { "--no-video-title-show", "--network-caching=1000" };
         instance = libvlc_new(sizeof(args) / sizeof(*args), args);
+        // Debug mode: libVLC's own messages next to ours (wpmedia-vlc.log).
+        if (instance && !access("/var/webporn/wpmedia-debug", F_OK))
+            libvlc_log_set(instance, vlcLog, NULL);
     });
     return instance;
 }
@@ -442,6 +463,10 @@ void wpmedia_open(wpmedia_player* p, const char* url, const char* mimeType, cons
     // Pause on the last frame instead of stopping: a stopped input closes the video
     // output, and replaying or seeking back would set it up again (~2.5 s).
     libvlc_media_add_option(media, ":play-and-pause");
+    // Adaptive streams (HLS, DASH): libVLC picks renditions the A6 cannot decode in
+    // time (1080p dropped a third of its frames) and that take longest to fetch
+    // after a seek. 720p decodes in real time and is above the iPhone's 640 px width.
+    libvlc_media_add_option(media, ":adaptive-maxheight=720");
     if (isMP4Family(url, mimeType))
         libvlc_media_add_option(media, ":demux=avformat,any");
     if (userAgent && *userAgent) {

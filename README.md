@@ -132,6 +132,13 @@ tests/wptest/build.sh                      # WPTest.app; `uiopen wptest:` on the
 device/last-crash.py WPTest                # newest crash report, WebPorn frames symbolized
 ```
 
+WPBox (`tests/wptest/build-box.sh`) is the same app installed the way an App Store app is
+(an .ipa into a container through `LSApplicationWorkspace`, `tests/wptest/mi-install.m` signed on
+the device with `device/entitlements/mi-install.xml`; sandboxed, no entitlements, so no JIT). It
+reads its files from its Documents directory and is switched on in `net.webporn.swap.plist`
+(`Enabled-net.webporn.wpbox`). Sandboxed, the swapped engine loads sites over TLSFix and plays
+MSE video. Both apps have a 568h launch image (they ran letterboxed at 320x480 before).
+
 WPTest loads `/var/mobile/Media/webporn/url.txt` (or `test.html`) and writes
 `result.txt` (JS probes), `screenshot.png` and `error.txt` there. Headless tests
 without UIKit: `tests/webview-smoke.m` (WebView + JS + PNG via `_drawRect:`),

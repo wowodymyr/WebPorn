@@ -13,7 +13,7 @@ clang -target armv7-apple-ios8.0 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" -O1 -fobjc
     -Wno-deprecated-declarations -c "$WP/tests/wptest/main.m" -o "$B/../main.o"
 clang -target armv7-apple-ios8.0 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" --ld-path="$T/ld" \
     -framework UIKit -framework Foundation -framework CFNetwork -framework CoreGraphics "$B/../main.o" -o "$B/WPTest"
-cp "$WP/tests/wptest/Info.plist" "$B/"
+cp "$WP/tests/wptest/Info.plist" "$WP/tests/wptest/Default-568h@2x.png" "$B/"
 "$T/ldid" -S "$B/WPTest"
 ssh "$HOST" 'rm -rf /Applications/WPTest.app.new; mkdir -p /var/mobile/Media/webporn; chown mobile:mobile /var/mobile/Media/webporn'
 scp -O -qr "$B" "$HOST:/Applications/WPTest.app.new"

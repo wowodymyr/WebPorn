@@ -4,7 +4,13 @@
 // Launch with `uiopen wptest:`.
 #import <UIKit/UIKit.h>
 
+#ifdef WP_SANDBOXED
+// WPBox: the same app installed as an App Store app would be (container, sandbox,
+// no entitlements); its files are in its Documents directory.
+#define kDir [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
+#else
 static NSString *const kDir = @"/var/mobile/Media/webporn";
+#endif
 
 static NSString *const kProbe =
     @"(() => { try { return [navigator.userAgent, document.title,"

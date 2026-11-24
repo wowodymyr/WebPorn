@@ -13,7 +13,6 @@
 	<key>MinimumOSVersion</key><string>8.0</string>
 	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 	<key>UIRequiredDeviceCapabilities</key><array><string>armv7</string></array>
-	<key>UILaunchImages</key><array/>
 	<key>CFBundleURLTypes</key>
 	<array><dict><key>CFBundleURLSchemes</key><array><string>wptest</string></array></dict></array>
 </dict>

@@ -193,6 +193,53 @@ static NSInteger applicationClassicMode(id self, SEL _cmd)
     return ((NSInteger (*)(id, SEL))objc_msgSend)(application, _cmd);
 }
 
+// NSLocale (iOS 10-11): language negotiation (text tracks, Intl) and parseLocale().
+static id localeComponent(NSLocale *self, NSString *key) { return [self objectForKey:key]; }
+static id localeLanguageCode(NSLocale *self, SEL _cmd) { return localeComponent(self, NSLocaleLanguageCode); }
+static id localeScriptCode(NSLocale *self, SEL _cmd) { return localeComponent(self, NSLocaleScriptCode); }
+static id localeCountryCode(NSLocale *self, SEL _cmd) { return localeComponent(self, NSLocaleCountryCode); }
+// The available languages that match the preferred ones, best first: an exact
+// identifier, then the same language (the part before '-' or '_').
+static NSArray *matchedLanguages(id self, SEL _cmd, NSArray<NSString *> *available, NSArray<NSString *> *preferred)
+{
+    NSString *(^base)(NSString *) = ^(NSString *language) {
+        return [[language componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-_"]].firstObject lowercaseString];
+    };
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSString *wanted in preferred) {
+        for (NSString *candidate in available) {
+            if ([candidate caseInsensitiveCompare:wanted] == NSOrderedSame && ![matches containsObject:candidate])
+                [matches addObject:candidate];
+        }
+        for (NSString *candidate in available) {
+            if ([base(candidate) isEqualToString:base(wanted)] && ![matches containsObject:candidate])
+                [matches addObject:candidate];
+        }
+    }
+    return matches;
+}
+
+// -[NSCoder decodeValueOfObjCType:at:size:] is iOS 11 (old, non-keyed archives).
+static void decodeValueWithSize(NSCoder *self, SEL _cmd, const char *type, void *data, NSUInteger size)
+{
+    [self decodeValueOfObjCType:type at:data];
+}
+
+// UIKit (iOS 11-13).
+static void performAsDataOwner(id self, SEL _cmd, NSInteger owner, void (^block)(void))
+{
+    if (block)
+        block();
+}
+// Semantic label colors (drag images): their light-mode values.
+static id labelColor(Class self, CGFloat alpha)
+{
+    return ((id (*)(id, SEL, CGFloat, CGFloat, CGFloat, CGFloat))objc_msgSend)(self, @selector(colorWithRed:green:blue:alpha:), 60 / 255.0, 60 / 255.0, 67 / 255.0, alpha);
+}
+static id secondaryLabelColor(Class self, SEL _cmd) { return labelColor(self, 0.6); }
+static id tertiaryLabelColor(Class self, SEL _cmd) { return labelColor(self, 0.3); }
+static id quaternaryLabelColor(Class self, SEL _cmd) { return labelColor(self, 0.18); }
+
 // AVFoundation (iOS 9-11).
 static id voiceLanguage(id self, SEL _cmd) { return ((id (*)(id, SEL))objc_msgSend)(self, @selector(language)); }
 static id voiceWithIdentifier(id self, SEL _cmd, NSString *identifier)
@@ -205,6 +252,10 @@ static BOOL audioSessionSetCategoryModePolicy(id self, SEL _cmd, NSString *categ
     if (ok && mode)
         ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(self, @selector(setMode:error:), mode, error);
     return ok;
+}
+static id speechVoicesIncludingSuperCompact(id self, SEL _cmd)
+{
+    return ((id (*)(id, SEL))objc_msgSend)(self, @selector(speechVoices));
 }
 static NSInteger playerTimeControlStatus(id self, SEL _cmd)
 {
@@ -266,6 +317,17 @@ static const struct {
     { "AVPlayer", false, "_setPreventsSleepDuringVideoPlayback:", (IMP)ignoreBool, "v@:c" },
     { "AVPlayerItem", false, "addMediaDataCollector:", (IMP)ignoreObject, "v@:@" },
     { "WebFilterEvaluator", true, "isManagedSession", (IMP)returnNO, "c@:" },
+    { "NSLocale", false, "languageCode", (IMP)localeLanguageCode, "@@:" },
+    { "NSLocale", false, "scriptCode", (IMP)localeScriptCode, "@@:" },
+    { "NSLocale", false, "countryCode", (IMP)localeCountryCode, "@@:" },
+    { "NSLocale", true, "matchedLanguagesFromAvailableLanguages:forPreferredLanguages:", (IMP)matchedLanguages, "@@:@@" },
+    { "NSCoder", false, "decodeValueOfObjCType:at:size:", (IMP)decodeValueWithSize, sizeof(NSUInteger) == 8 ? "v@:*^vQ" : "v@:*^vI" },
+    { "UIPasteboard", true, "_performAsDataOwner:block:", (IMP)performAsDataOwner, sizeof(NSInteger) == 8 ? "v@:q@?" : "v@:i@?" },
+    { "UIColor", true, "secondaryLabelColor", (IMP)secondaryLabelColor, "@@:" },
+    { "UIColor", true, "tertiaryLabelColor", (IMP)tertiaryLabelColor, "@@:" },
+    { "UIColor", true, "quaternaryLabelColor", (IMP)quaternaryLabelColor, "@@:" },
+    { "AVSpeechSynthesisVoice", true, "speechVoicesIncludingSuperCompact", (IMP)speechVoicesIncludingSuperCompact, "@@:" },
+    { "AVAudioSession", false, "routingContextUID", (IMP)returnNil, "@@:" },
 };
 
 // Classes from frameworks loaded after WebCore (AVFoundation, UIKit,

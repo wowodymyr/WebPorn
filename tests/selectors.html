@@ -1,0 +1,26 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>start</title>
+<!-- Paths that send selectors iOS 8 classes lacked (toolchain/selector-triage.py):
+     each step logs; a crash ends the log early. -->
+<style>body{font:13px sans-serif;margin:8px} video{width:160px}</style>
+<p id="text" contenteditable>Copy me <b>bold</b> text</p>
+<video id="v" src="media/jellyfish-720.mp4" muted playsinline>
+  <track kind="subtitles" srclang="en-US" label="English" src="data:text/vtt,WEBVTT">
+  <track kind="subtitles" srclang="de" label="Deutsch" src="data:text/vtt,WEBVTT">
+</video>
+<pre id="log"></pre>
+<script>
+const log = [];
+function note(s) { log.push(s); document.getElementById('log').textContent = log.join('\n'); document.title = log.join(' | '); }
+function step(name, fn) { try { note(name + ': ' + fn()); } catch (e) { note(name + ': threw ' + e); } }
+step('voices', () => { const v = speechSynthesis.getVoices(); return v.length + ' ' + (v[0] ? v[0].lang : ''); });
+setTimeout(() => step('voices later', () => speechSynthesis.getVoices().length), 1500);
+step('language', () => navigator.language + ' ' + navigator.languages);
+step('Intl', () => new Intl.DateTimeFormat().resolvedOptions().locale + ' ' + new Intl.Locale('zh-Hant-TW').script);
+step('tracks', () => { const t = document.getElementById('v').textTracks; return t.length + ' ' + Array.from(t).map(x => x.language + ':' + x.mode).join(','); });
+step('copy', () => { const r = document.createRange(); r.selectNodeContents(document.getElementById('text')); getSelection().removeAllRanges(); getSelection().addRange(r); return document.execCommand('copy'); });
+step('pip supported', () => document.getElementById('v').webkitSupportsPresentationMode('picture-in-picture'));
+step('pip set', () => { document.getElementById('v').webkitSetPresentationMode('picture-in-picture'); return document.getElementById('v').webkitPresentationMode; });
+setTimeout(() => step('done', () => 'alive'), 3000);
+</script>

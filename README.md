@@ -113,11 +113,15 @@ WebKitLegacy binaries to force a relink.
 that no class or category in the shared cache implements — unrecognized-selector
 crashes the linker cannot see. The phone's cache copy was taken from memory and has
 some pointers slid by 0x3a74000; the script copes. Result for armv7-ios8:
-`device/iphone5-8.4.1/missing-selectors.tsv` (lib, selector, source files), still to be
-triaged; many are behind respondsToSelector:, informal protocols, or media/PiP code that
-is unreachable without the iOS 9+ classes. Shimmed so far (runtime class_addMethod in
-webcore_ios8_compat.m): -[NSHTTPCookie sameSitePolicy], -[NSProcessInfo
-isLowPowerModeEnabled/thermalState].
+`device/iphone5-8.4.1/missing-selectors.tsv` (229: 165 WebCore, 58 WebKitLegacy, 6 JSC),
+triaged in `device/iphone5-8.4.1/selector-triage.md` with `toolchain/selector-triage.py`
+(where each selector is sent; guards; already-shimmed ones). Every one has a verdict: 45
+shimmed at runtime (`webcore_ios8_compat.m`: cookies SPI, NSLocale/NSCoder/NSTimer/archiver,
+UIKit safe areas and label colors, UIPasteboard data owner, AVSpeechSynthesisVoice,
+AVAudioSession...), the rest guarded, sent to classes iOS 8 does not have (nil), or in code
+this WebKit1 build never runs (AVFoundation engines, AVKit presentation, WebKit2-only
+paths, plug-ins); `-[UIApplication _hardwareKeyboard]` got a respondsToSelector: check and
+non-standard full-screen modes are refused. `tests/selectors.html` exercises the live ones.
 
 ```sh
 toolchain/build-libcxx.sh arm64 10.0 iPhoneOS10.3 && toolchain/build-compat.sh arm64 10.0 iPhoneOS10.3

@@ -274,6 +274,8 @@ static void finishPreroll(wpmedia_player* p)
     reportState(p, p->wantsPlaying ? WPMEDIA_STATE_PLAYING : WPMEDIA_STATE_PAUSED);
 }
 
+static int streamInputEnded(wpstream*);
+
 static void handleEvent(const libvlc_event_t* event, void* data)
 {
     wpmedia_player* p = data;
@@ -302,7 +304,10 @@ static void handleEvent(const libvlc_event_t* event, void* data)
             // :play-and-pause stops on the last frame: a pause nobody asked for
             // at the end is the end of the media.
             double time = libvlc_media_player_get_time(p->player) / 1000.0;
-            if (p->wantsPlaying && p->duration > 0 && time >= p->duration - 0.5) {
+            // A live (MSE) stream has no duration: its end is the end of the input.
+            int inputEnded = p->live && p->stream && streamInputEnded(p->stream);
+            debugLog("paused at %.2f, wants playing %d, input ended %d", time, p->wantsPlaying, inputEnded);
+            if (p->wantsPlaying && (inputEnded || (p->duration > 0 && time >= p->duration - 0.5))) {
                 p->wantsPlaying = 0;
                 reportState(p, WPMEDIA_STATE_ENDED);
                 return;
@@ -427,6 +432,15 @@ static void streamRequest(wpstream* s, uint64_t offset)
     s->failed = 0;
     debugLog("stream request gen %u at %llu", s->generation, (unsigned long long)offset);
     s->request(s->context, s->generation, offset);
+}
+
+// The client ended the stream and libVLC has read all of it.
+static int streamInputEnded(wpstream* s)
+{
+    pthread_mutex_lock(&s->lock);
+    int ended = s->ended && s->position >= s->base + s->length;
+    pthread_mutex_unlock(&s->lock);
+    return ended;
 }
 
 static int streamOpen(void* opaque, void** data, uint64_t* size)

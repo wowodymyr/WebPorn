@@ -216,9 +216,14 @@ Gotchas found on the way:
   `:demux=avformat,any` for mp4 (libVLC's mp4 demuxer froze the clock at 0.25 s on a
   video-only file with an edit list); views created asynchronously on the main thread and stop
   on a background queue (the WebThread may hold the web lock while the main thread waits).
-  WebCore: video always plays inline on WK26 (`requiresFullscreenForVideoPlayback` false,
-  `enterFullscreen` refused without player support): the WebKit1 fullscreen path needs iOS 13
-  AVKit (`-[UIWindow windowScene]`). `tests/media/video.html` logs the media events (WPTest,
+  WebCore: video plays inline on WK26 (`requiresFullscreenForVideoPlayback` false); the WebKit1
+  fullscreen path needs iOS 13 AVKit (`-[UIWindow windowScene]`), so full screen (controls'
+  button, `webkitEnterFullscreen`) is the player's: HTMLMediaElement sets the fullscreen mode,
+  `wpmedia_set_fullscreen` (ABI 4) moves libVLC's view into a black window of its own, turned
+  to landscape for a wide video; a tap shows Done and play/pause (`fullscreen_action`, routed
+  to the element through `HTMLMediaElement::allMediaElements()`). Test: `tests/media/fullscreen.html`.
+  Main run loop `RunLoop::Timer`s take the web lock on WK26 (MediaSessionManagerCocoa's
+  now-playing timer started Page timers on the UI thread and crashed). `tests/media/video.html` logs the media events (WPTest,
   `capture-delay.txt`); Safari plays after a tap. VNC (Veency) shows the libVLC GL layer full
   screen; the real screen / in-app capture is right. Control icons, early seeks and canvas
   drawImage(video) (libVLC snapshots, refreshed every 250 ms) were fixed later.

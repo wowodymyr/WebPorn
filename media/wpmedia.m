@@ -53,19 +53,141 @@ static void debugLog(const char* format, ...)
 
 // MARK: - Host layer
 
-// Keeps libVLC's drawable view the size of the layer WebCore lays out.
+// The full-screen window: black, the video turned to landscape when it is wider
+// than the portrait screen, and a bar (Done, play/pause) a tap shows for a while.
+@interface WPFullscreenWindow : UIWindow
+@property (nonatomic, copy) void (^action)(wpmedia_fullscreen_action);
+@property (nonatomic, strong) UIView* content;
+@property (nonatomic, strong) UIView* bar;
+- (instancetype)initWithVideoSize:(CGSize)size;
+- (void)showVideoView:(UIView*)view;
+@end
+
+@implementation WPFullscreenWindow
+
+- (instancetype)initWithVideoSize:(CGSize)size
+{
+    CGRect bounds = [UIScreen mainScreen].bounds;
+    if (!(self = [super initWithFrame:bounds]))
+        return nil;
+    self.windowLevel = UIWindowLevelStatusBar + 1;
+    self.backgroundColor = [UIColor blackColor];
+    BOOL landscape = size.width > size.height && bounds.size.height > bounds.size.width;
+    _content = [[UIView alloc] initWithFrame:landscape ? CGRectMake(0, 0, bounds.size.height, bounds.size.width) : bounds];
+    _content.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    if (landscape)
+        _content.transform = CGAffineTransformMakeRotation(M_PI_2);
+    _content.backgroundColor = [UIColor blackColor];
+    [self addSubview:_content];
+
+    _bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _content.bounds.size.width, 44)];
+    _bar.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    UIButton* done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.frame = CGRectMake(8, 0, 80, 44);
+    done.tintColor = [UIColor whiteColor];
+    done.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [done setTitle:@"Done" forState:UIControlStateNormal];
+    done.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [done addTarget:self action:@selector(done) forControlEvents:UIControlEventTouchUpInside];
+    [_bar addSubview:done];
+    UIButton* playback = [UIButton buttonWithType:UIButtonTypeSystem];
+    playback.frame = CGRectMake((_bar.bounds.size.width - 120) / 2, 0, 120, 44);
+    playback.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+    playback.tintColor = [UIColor whiteColor];
+    playback.titleLabel.font = [UIFont systemFontOfSize:22];
+    [playback setTitle:@"\u25B6\uFE0E \u275A\u275A" forState:UIControlStateNormal];
+    [playback addTarget:self action:@selector(togglePlayback) forControlEvents:UIControlEventTouchUpInside];
+    [_bar addSubview:playback];
+    [_content addSubview:_bar];
+
+    UITapGestureRecognizer* tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)];
+    [_content addGestureRecognizer:tap];
+    [self hideBarLater];
+    return self;
+}
+
+- (void)showVideoView:(UIView*)view
+{
+    view.frame = self.content.bounds;
+    view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.content insertSubview:view belowSubview:self.bar];
+    for (UIView* subview in view.subviews)
+        subview.frame = view.bounds;
+}
+
+- (void)tapped:(UITapGestureRecognizer*)tap
+{
+    CGPoint point = [tap locationInView:self.content];
+    debugLog("fullscreen tap at %.0f,%.0f (window %.0f,%.0f), bar %s", point.x, point.y, [tap locationInView:self].x, [tap locationInView:self].y, self.bar.hidden ? "hidden" : "shown");
+    if (!self.bar.hidden && CGRectContainsPoint(self.bar.frame, [tap locationInView:self.content]))
+        return;
+    self.bar.hidden = !self.bar.hidden;
+    [self hideBarLater];
+}
+
+- (void)hideBarLater
+{
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideBar) object:nil];
+    if (!self.bar.hidden)
+        [self performSelector:@selector(hideBar) withObject:nil afterDelay:3];
+}
+
+- (void)hideBar
+{
+    self.bar.hidden = YES;
+}
+
+- (void)done
+{
+    debugLog("fullscreen: done");
+    if (self.action)
+        self.action(WPMEDIA_FULLSCREEN_EXIT);
+}
+
+- (void)togglePlayback
+{
+    debugLog("fullscreen: play/pause");
+    if (self.action)
+        self.action(WPMEDIA_FULLSCREEN_TOGGLE_PLAYBACK);
+    [self hideBarLater];
+}
+
+@end
+
+// Keeps libVLC's drawable view the size of the layer WebCore lays out, except
+// while it is in the full-screen window.
 @interface WPMediaLayer : CALayer
 @property (nonatomic, strong) UIView* drawable;
+@property (nonatomic, strong) WPFullscreenWindow* fullscreenWindow;
+- (void)exitFullscreen;
 @end
 
 @implementation WPMediaLayer
+
+- (void)exitFullscreen
+{
+    WPFullscreenWindow* window = self.fullscreenWindow;
+    if (!window)
+        return;
+    window.action = nil;
+    self.fullscreenWindow = nil;
+    UIView* drawable = self.drawable;
+    if (drawable) {
+        [drawable removeFromSuperview];
+        drawable.autoresizingMask = UIViewAutoresizingNone;
+        [self addSublayer:drawable.layer];
+    }
+    window.hidden = YES;
+    [self setNeedsLayout];
+}
 
 - (void)layoutSublayers
 {
     [super layoutSublayers];
     CGRect bounds = self.bounds;
     UIView* drawable = self.drawable;
-    if (!drawable)
+    if (!drawable || self.fullscreenWindow)
         return;
     void (^resize)(void) = ^{
         [CATransaction begin];
@@ -90,6 +212,18 @@ static void debugLog(const char* format, ...)
 
 typedef struct wpstream wpstream;
 
+// What the full-screen window's buttons reach: the client, until the player is
+// torn down (only touched on the player's queue).
+@interface WPClientTarget : NSObject {
+@public
+    wpmedia_client client;
+    BOOL valid;
+}
+@end
+
+@implementation WPClientTarget
+@end
+
 struct wpmedia_player {
     wpmedia_client client;
     wpstream* stream; // wpmedia_open_stream; outlives p until libVLC has stopped
@@ -99,6 +233,7 @@ struct wpmedia_player {
     libvlc_media_player_t* player;
     libvlc_media_t* media;
     void* layer; // WPMediaLayer, retained
+    void* target; // WPClientTarget, retained
     dispatch_queue_t queue; // serializes control calls and metadata queries
     int ready; // drawable attached and media set
     int wantsPlaying;
@@ -643,6 +778,10 @@ wpmedia_player* wpmedia_create(const wpmedia_client* client)
     WPMediaLayer* layer = [WPMediaLayer layer];
     layer.masksToBounds = YES;
     p->layer = (__bridge_retained void*)layer;
+    WPClientTarget* target = [WPClientTarget new];
+    target->client = p->client;
+    target->valid = YES;
+    p->target = (__bridge_retained void*)target;
     libvlc_event_manager_t* events = libvlc_media_player_event_manager(p->player);
     for (size_t i = 0; i < sizeof(handledEvents) / sizeof(*handledEvents); i++)
         libvlc_event_attach(events, handledEvents[i], handleEvent, p);
@@ -668,6 +807,7 @@ void wpmedia_destroy(wpmedia_player* p)
         pthread_mutex_unlock(&stream->lock);
     }
     WPMediaLayer* layer = (__bridge_transfer WPMediaLayer*)p->layer;
+    WPClientTarget* target = (__bridge_transfer WPClientTarget*)p->target;
     // On p's own (serial, background) queue: a restart still queued there would
     // otherwise set a new input after the player was stopped and play a stream
     // freed here (a crash in libVLC's input thread when YouTube rebuilt its player).
@@ -679,7 +819,9 @@ void wpmedia_destroy(wpmedia_player* p)
             libvlc_media_release(p->media);
         if (p->stream)
             streamDestroy(p->stream);
+        target->valid = NO;
         dispatch_async(dispatch_get_main_queue(), ^{
+            [layer exitFullscreen];
             [layer.drawable removeFromSuperview];
             [layer.drawable.layer removeFromSuperlayer];
             layer.drawable = nil;
@@ -687,6 +829,34 @@ void wpmedia_destroy(wpmedia_player* p)
         if (p->client.release)
             p->client.release(p->client.context);
         free(p);
+    });
+}
+
+void wpmedia_set_fullscreen(wpmedia_player* p, int fullscreen)
+{
+    WPMediaLayer* layer = (__bridge WPMediaLayer*)p->layer;
+    WPClientTarget* target = (__bridge WPClientTarget*)p->target;
+    dispatch_queue_t queue = p->queue;
+    CGSize size = CGSizeMake(p->width, p->height);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!fullscreen) {
+            [layer exitFullscreen];
+            return;
+        }
+        if (layer.fullscreenWindow || !layer.drawable)
+            return;
+        WPFullscreenWindow* window = [[WPFullscreenWindow alloc] initWithVideoSize:size];
+        window.action = ^(wpmedia_fullscreen_action action) {
+            dispatch_async(queue, ^{
+                if (target->valid && target->client.fullscreen_action)
+                    target->client.fullscreen_action(target->client.context, action);
+            });
+        };
+        layer.fullscreenWindow = window;
+        [layer.drawable.layer removeFromSuperlayer];
+        [window showVideoView:layer.drawable];
+        window.hidden = NO;
+        debugLog("fullscreen %.0fx%.0f", size.width, size.height);
     });
 }
 

@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define WPMEDIA_ABI_VERSION 3
+#define WPMEDIA_ABI_VERSION 4
 
 typedef struct wpmedia_player wpmedia_player;
 
@@ -33,6 +33,11 @@ typedef enum {
     WPMEDIA_MAYBE_SUPPORTED,
     WPMEDIA_SUPPORTED,
 } wpmedia_support;
+
+typedef enum {
+    WPMEDIA_FULLSCREEN_EXIT, // the client should leave full screen (and call wpmedia_set_fullscreen 0)
+    WPMEDIA_FULLSCREEN_TOGGLE_PLAYBACK,
+} wpmedia_fullscreen_action;
 
 typedef struct {
     void* context;
@@ -56,6 +61,8 @@ typedef struct {
     // Last call for this client, after every other callback, once the player is
     // torn down (some time after wpmedia_destroy): release the context here.
     void (*release)(void* context);
+    // The viewer used the full-screen window's controls (wpmedia_set_fullscreen).
+    void (*fullscreen_action)(void* context, wpmedia_fullscreen_action);
 } wpmedia_client;
 
 int wpmedia_abi_version(void);
@@ -100,6 +107,9 @@ void wpmedia_set_rate(wpmedia_player*, float rate);
 void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
 void wpmedia_set_muted(wpmedia_player*, int muted);
 
+// Shows the video in a window of its own over the whole screen (turned for a
+// landscape video; a tap shows Done and play/pause), or puts it back in its layer.
+void wpmedia_set_fullscreen(wpmedia_player*, int fullscreen);
 // The current video frame as a CGImageRef (+1, the caller releases it), at most
 // max_width pixels wide, or NULL. Blocks for a few hundred milliseconds
 // (libVLC's snapshot: the frame is read back from the GPU); cache it.

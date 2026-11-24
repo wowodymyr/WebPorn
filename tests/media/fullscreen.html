@@ -1,0 +1,22 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<!-- Full screen through the player's own window (WK26: no AVKit presentation).
+     Tap "Full screen" (or the controls' button); the log shows the events. -->
+<style>body{font:14px sans-serif;margin:8px} video{width:100%;background:#000} button{font-size:18px;padding:8px 16px;margin:8px 0}</style>
+<video id="v" src="jellyfish-720.mp4" muted playsinline controls></video>
+<button id="b">Full screen</button>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [], t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-8).join(' | '); }
+note('supports ' + v.webkitSupportsFullscreen);
+for (const e of ['webkitbeginfullscreen', 'webkitendfullscreen', 'webkitpresentationmodechanged', 'playing', 'pause'])
+  v.addEventListener(e, () => note(e + ' displaying=' + v.webkitDisplayingFullscreen + ' mode=' + v.webkitPresentationMode + ' t=' + v.currentTime.toFixed(1)));
+document.getElementById('b').onclick = () => {
+  v.play();
+  try { v.webkitEnterFullscreen(); note('enter called'); } catch (e) { note('enter failed ' + e); }
+};
+if (location.hash == '#auto')
+  setTimeout(() => document.getElementById('b').onclick(), 3000);
+</script>

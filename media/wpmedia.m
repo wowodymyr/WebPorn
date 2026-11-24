@@ -413,6 +413,7 @@ struct wpstream {
     int ended; // ... and it reached the end of the stream
     int failed;
     int closed; // wpmedia_destroy: reads fail, no more requests
+    FILE* dump; // debug: the bytes of a live (MSE) stream, stream-<n>.mkv
 };
 
 // With the lock held. The client only posts the request to its own thread.
@@ -465,11 +466,15 @@ static ssize_t streamRead(void* opaque, unsigned char* buffer, size_t length)
             break;
         }
         if (s->position == end && s->failed) {
+            debugLog("stream read at %llu: failed", (unsigned long long)s->position);
             result = -1;
             break;
         }
-        if (s->position < s->base || s->position > end) {
+        if (!s->seekable && s->position > end && !s->ended && !s->failed) {
+            // Forward of the data (a live stream): wait for it.
+        } else if (s->position < s->base || s->position > end) {
             if (!s->seekable) {
+                debugLog("stream read at %llu: outside %llu-%llu", (unsigned long long)s->position, (unsigned long long)s->base, (unsigned long long)end);
                 result = -1;
                 break;
             }
@@ -490,7 +495,13 @@ static int streamSeek(void* opaque, uint64_t offset)
     pthread_mutex_lock(&s->lock);
     uint64_t end = s->base + s->length;
     int result = 0;
-    if (offset < s->base || offset > end + (s->loading ? kStreamGap : 0)) {
+    if (!s->seekable) {
+        // A live (MSE) stream: libVLC's Matroska demuxer needs a seekable input,
+        // but only moves inside what it has read or forward into what is coming.
+        if (offset < s->base)
+            result = -1;
+        debugLog("stream seek to %llu (window %llu-%llu)%s", (unsigned long long)offset, (unsigned long long)s->base, (unsigned long long)end, result ? ": behind" : "");
+    } else if (offset < s->base || offset > end + (s->loading ? kStreamGap : 0)) {
         if (s->seekable) {
             // Out of the window: start over at the target.
             s->base = offset;
@@ -533,6 +544,10 @@ int wpmedia_stream_data(wpmedia_player* p, unsigned generation, const void* byte
             }
         }
         if (s->length + length <= s->capacity) {
+            if (s->dump) {
+                fwrite(bytes, 1, length, s->dump);
+                fflush(s->dump);
+            }
             memcpy(s->bytes + s->length, bytes, length);
             s->length += length;
             pthread_cond_broadcast(&s->changed);
@@ -577,11 +592,19 @@ static wpstream* streamCreate(wpmedia_player* p, unsigned long long size, int se
     s->size = size;
     s->seekable = seekable && size;
     s->loading = 1; // the client's first load, generation 0
+    if (!s->seekable && !access("/var/webporn/wpmedia-debug", F_OK)) {
+        static int count;
+        char path[128];
+        snprintf(path, sizeof(path), "/var/mobile/Media/webporn/stream-%d.mkv", count++ % 4);
+        s->dump = fopen(path, "w");
+    }
     return s;
 }
 
 static void streamDestroy(wpstream* s)
 {
+    if (s->dump)
+        fclose(s->dump);
     pthread_mutex_destroy(&s->lock);
     pthread_cond_destroy(&s->changed);
     free(s->bytes);
@@ -720,7 +743,7 @@ void wpmedia_open_stream(wpmedia_player* p, const char* url, const char* mimeTyp
     p->stream = streamCreate(p, size, seekable);
     p->live = !p->stream->seekable;
     debugLog("open stream %s (%s) size %llu seekable %d", url, mimeType ? mimeType : "-", size, p->stream->seekable);
-    libvlc_media_t* media = libvlc_media_new_callbacks(sharedInstance(), streamOpen, streamRead, p->stream->seekable ? streamSeek : NULL, streamClose, p->stream);
+    libvlc_media_t* media = libvlc_media_new_callbacks(sharedInstance(), streamOpen, streamRead, streamSeek, streamClose, p->stream);
     if (!media) {
         reportState(p, WPMEDIA_STATE_ERROR);
         return;

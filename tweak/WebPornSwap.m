@@ -714,18 +714,20 @@ static void hookOldWTF(void (*hookFunction)(void*, void*, void**))
 // into DeprecatedGlobalSettings before the media engine list is built. The
 // argument domain beats both the app's defaults and WebPreferences' registered
 // ones, and nothing is persisted. /var/webporn/use-avfoundation keeps it on.
-static void disableAVFoundationEngine(void)
+// Media Source goes the same way: the stock WebKit registers its own (older)
+// defaults, and WebPorn's MSE (libVLC) is on unless /var/webporn/no-mse exists.
+static void setMediaDefaults(void)
 {
-    if (!access("/var/webporn/use-avfoundation", F_OK)) {
-        logf_("AVFoundation media engine: left on\n");
-        return;
-    }
     NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
     NSMutableDictionary* arguments = [[defaults volatileDomainForName:NSArgumentDomain] mutableCopy] ?: [NSMutableDictionary dictionary];
-    arguments[@"WebKitAVFoundationEnabled"] = @NO;
+    bool avfoundation = !access("/var/webporn/use-avfoundation", F_OK);
+    bool mse = access("/var/webporn/no-mse", F_OK);
+    if (!avfoundation)
+        arguments[@"WebKitAVFoundationEnabled"] = @NO;
+    arguments[@"WebKitMediaSourceEnabled"] = @(mse);
     [defaults removeVolatileDomainForName:NSArgumentDomain];
     [defaults setVolatileDomain:arguments forName:NSArgumentDomain];
-    logf_("AVFoundation media engine: disabled\n");
+    logf_("AVFoundation media engine: %s, Media Source: %s\n", avfoundation ? "left on" : "disabled", mse ? "on" : "off");
 }
 
 // MARK: - Entry
@@ -800,7 +802,7 @@ __attribute__((constructor)) static void webPornSwap(void)
 
         moveCategories();
         installEngineShims();
-        disableAVFoundationEngine();
+        setMediaDefaults();
         swapped = true;
         logf_("swap done\n");
     }

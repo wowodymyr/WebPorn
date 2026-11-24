@@ -70,6 +70,18 @@ static NSString *const kProbe =
     // probe.js, when present, replaces the built-in probe (any expression yielding a string).
     NSString *probe = [NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"probe.js"] encoding:NSUTF8StringEncoding error:nil] ?: kProbe;
     NSString *result = [self.webView stringByEvaluatingJavaScriptFromString:probe];
+    // prefs.txt: preference keys (one per line) to report from the WebView's WebPreferences.
+    NSString *prefKeys = [NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"prefs.txt"] encoding:NSUTF8StringEncoding error:nil];
+    if (prefKeys.length) {
+        id documentView = [self.webView respondsToSelector:@selector(_documentView)] ? [self.webView performSelector:@selector(_documentView)] : nil;
+        id preferences = [[documentView performSelector:@selector(webView)] performSelector:@selector(preferences)];
+        NSMutableString *report = [NSMutableString stringWithFormat:@"%@\n# prefs %@ (%@)\n", result, preferences, [preferences performSelector:@selector(identifier)]];
+        for (NSString *key in [prefKeys componentsSeparatedByString:@"\n"]) {
+            if (key.length)
+                [report appendFormat:@"%@ = %@ (defaults %@)\n", key, [preferences performSelector:@selector(_valueForKey:) withObject:key], [[NSUserDefaults standardUserDefaults] objectForKey:key]];
+        }
+        result = report;
+    }
     [result writeToFile:[kDir stringByAppendingPathComponent:@"result.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     UIGraphicsBeginImageContextWithOptions(self.window.bounds.size, YES, 0);
     [self.window drawViewHierarchyInRect:self.window.bounds afterScreenUpdates:YES];

@@ -1,0 +1,184 @@
+From 393ec2c9b5a5267092a4fc9c080d53b2633a033c Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:33:18 +0200
+Subject: [PATCH 14/24] WebPorn MSE: wait for every source buffer's tracks,
+ drop stale samples during restarts, Matroska DefaultDuration (libVLC clock),
+ mse.log
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../graphics/webporn/WebPornMediaSource.cpp   | 72 ++++++++++++++++++-
+ 1 file changed, 71 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+index 5a7db1c93a..d6edcddd47 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+@@ -19,6 +19,10 @@
+ #include "SourceBufferPrivate.h"
+ #include "SourceBufferPrivateClient.h"
+ #include "VideoTrackPrivate.h"
++#include <mutex>
++#include <stdarg.h>
++#include <stdio.h>
++#include <unistd.h>
+ #include <wtf/Deque.h>
+ #include <wtf/NativePromise.h>
+ #include <wtf/SetForScope.h>
+@@ -29,6 +33,29 @@
+ 
+ namespace WebCore {
+ 
++// /var/webporn/wpmedia-debug present: muxer decisions to mse.log.
++static void mseLog(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
++static void mseLog(const char* format, ...)
++{
++    static FILE* file;
++    static std::once_flag once;
++    static MonotonicTime start;
++    std::call_once(once, [] {
++        start = MonotonicTime::now();
++        if (!access("/var/webporn/wpmedia-debug", F_OK))
++            file = fopen("/var/mobile/Media/webporn/mse.log", "w");
++    });
++    if (!file)
++        return;
++    fprintf(file, "%7.3f ", (MonotonicTime::now() - start).seconds());
++    va_list args;
++    va_start(args, format);
++    vfprintf(file, format, args);
++    va_end(args);
++    fputc('\n', file);
++    fflush(file);
++}
++
+ // MARK: - Tracks and samples
+ 
+ enum class WebPornCodec : uint8_t { H264, AAC };
+@@ -619,9 +646,11 @@ private:
+         bool ended { false };
+         bool flushedInRestart { false };
+         bool wantsNotification { false };
++        unsigned logged { 0 };
+     };
+ 
+     Track* track(SourceBufferPrivateWebPorn&, TrackID);
++    bool allSourceBuffersHaveTracks() const;
+     void pump();
+     void startStream();
+     void writeBlock(Track&, WebPornMediaSample&);
+@@ -777,7 +806,8 @@ void WebPornMatroskaMuxer::addTrack(SourceBufferPrivateWebPorn& owner, TrackID t
+         existing->config = WTF::move(config);
+         return;
+     }
+-    m_tracks.append(makeUnique<Track>(Track { ThreadSafeWeakPtr { owner }, trackID, unsigned(m_tracks.size() + 1), WTF::move(config), { }, false, false, false }));
++    m_tracks.append(makeUnique<Track>(Track { ThreadSafeWeakPtr { owner }, trackID, unsigned(m_tracks.size() + 1), WTF::move(config), { }, false, false, false, 0 }));
++    mseLog("add track %u (%s)", m_tracks.last()->number, m_tracks.last()->config->isVideo() ? "video" : "audio");
+     // A track that appears once the stream runs needs a new stream (new Tracks element).
+     if (m_streamStarted)
+         beginRestart();
+@@ -787,6 +817,7 @@ void WebPornMatroskaMuxer::beginRestart()
+ {
+     if (m_restarting)
+         return;
++    mseLog("restart, target %.3f", m_target.toDouble());
+     m_restarting = true;
+     m_prerollStart = std::nullopt;
+     m_ended = false;
+@@ -808,6 +839,7 @@ void WebPornMatroskaMuxer::beginRestart()
+             if (track->flushedInRestart)
+                 continue;
+             track->flushedInRestart = true;
++            mseLog("reenqueue track %u", track->number);
+             if (RefPtr owner = track->owner.get())
+                 owner->reenqueue(track->trackID);
+         }
+@@ -825,6 +857,7 @@ void WebPornMatroskaMuxer::flush(SourceBufferPrivateWebPorn& owner, TrackID trac
+     auto* track = this->track(owner, trackID);
+     if (!track)
+         return;
++    mseLog("flush track %u%s", track->number, m_restarting ? "" : " (no seek)");
+     if (!m_restarting) {
+         // A flush without a seek (reenqueueMediaIfNeeded after a removal): start
+         // over from the current time.
+@@ -841,8 +874,14 @@ void WebPornMatroskaMuxer::enqueue(SourceBufferPrivateWebPorn& owner, TrackID tr
+     auto* track = this->track(owner, trackID);
+     if (!track)
+         return;
++    // During a restart a track that was not flushed still sends what follows its
++    // old position: drop that until it is re-enqueued from the target.
++    if (m_restarting && !track->flushedInRestart)
++        return;
+     track->ended = false;
+     m_ended = false;
++    if (track->queue.isEmpty() || !(track->logged++ % 200))
++        mseLog("enqueue track %u dts %.3f pts %.3f%s (queued %zu)", track->number, sample->decodeTime().toDouble(), sample->presentationTime().toDouble(), (sample->flags() & MediaSample::IsNonDisplaying) ? " non-displaying" : "", track->queue.size());
+     track->queue.append(WTF::move(sample));
+     pump();
+ }
+@@ -850,6 +889,8 @@ void WebPornMatroskaMuxer::enqueue(SourceBufferPrivateWebPorn& owner, TrackID tr
+ void WebPornMatroskaMuxer::trackEnded(SourceBufferPrivateWebPorn& owner, TrackID trackID)
+ {
+     if (auto* track = this->track(owner, trackID)) {
++        if (m_restarting && !track->flushedInRestart)
++            return;
+         track->ended = true;
+         pump();
+     }
+@@ -898,6 +939,7 @@ void WebPornMatroskaMuxer::notifyReadyTracks()
+ 
+ void WebPornMatroskaMuxer::startStream()
+ {
++    mseLog("start stream, %zu tracks, target %.3f", m_tracks.size(), m_target.toDouble());
+     m_mediaSource.startSinkStream();
+     m_streamStarted = true;
+     m_restarting = false;
+@@ -933,6 +975,14 @@ void WebPornMatroskaMuxer::startStream()
+                 appendString(entry, 0x86, config.isVideo() ? "V_MPEG4/ISO/AVC"_s : "A_AAC"_s); // CodecID
+                 appendElement(entry, 0x63A2, config.codecPrivate.span()); // CodecPrivate
+                 if (config.isVideo()) {
++                    // DefaultDuration: libVLC's Matroska demuxer only knows the DTS of
++                    // key frames and derives the others from it (last DTS + default
++                    // duration). Without it the clock of the input stood still from
++                    // one key frame to the next (seconds): no time updates, and pages
++                    // took playback for stalled.
++                    auto frameDuration = track->queue.isEmpty() ? MediaTime::invalidTime() : track->queue.first()->duration();
++                    double nanoseconds = frameDuration.isValid() && frameDuration > MediaTime::zeroTime() ? frameDuration.toDouble() * 1e9 : 1e9 / 30;
++                    appendUnsigned(entry, 0x23E383, static_cast<uint64_t>(nanoseconds));
+                     appendMaster(entry, 0xE0, [&](auto& video) {
+                         appendUnsigned(video, 0xB0, config.width);
+                         appendUnsigned(video, 0xBA, config.height);
+@@ -1008,6 +1058,19 @@ bool WebPornMatroskaMuxer::flushCluster()
+     return m_mediaSource.appendToSink(cluster.span());
+ }
+ 
++bool WebPornMatroskaMuxer::allSourceBuffersHaveTracks() const
++{
++    for (auto& sourceBuffer : m_mediaSource.sourceBuffers()) {
++        bool hasTrack = std::ranges::any_of(m_tracks, [&](auto& track) {
++            RefPtr owner = track->owner.get();
++            return owner.get() == sourceBuffer.ptr();
++        });
++        if (!hasTrack)
++            return false;
++    }
++    return true;
++}
++
+ void WebPornMatroskaMuxer::pump()
+ {
+     if (m_pumping || m_blocked || m_tracks.isEmpty())
+@@ -1028,6 +1091,13 @@ void WebPornMatroskaMuxer::pump()
+         // Every track must have its next sample (or be done) to keep the order.
+         if (waiting || !next)
+             break;
++        // The first stream waits for every source buffer's tracks: pages append
++        // one buffer's media before the other's initialization segment, and a
++        // track added later costs a restart (its earlier samples are lost).
++        if (!m_streamStarted && !allSourceBuffersHaveTracks())
++            break;
++        if (m_restarting && std::ranges::any_of(m_tracks, [](auto& track) { return !track->flushedInRestart; }))
++            break;
+         if (!m_streamStarted || m_restarting) {
+             startStream();
+             if (m_blocked)

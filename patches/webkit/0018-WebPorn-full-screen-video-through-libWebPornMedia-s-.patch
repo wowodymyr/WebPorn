@@ -1,0 +1,214 @@
+From 5fbb1bc861ff1fd95bc187e195eb28dba3dfdc14 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 10:09:46 +0200
+Subject: [PATCH 18/24] WebPorn: full-screen video through libWebPornMedia's
+ own window (no AVKit presentation on WebKit1 before iOS 13); main RunLoop
+ timers take the web lock
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WTF/wtf/cf/RunLoopCF.cpp               | 12 ++++++
+ Source/WebCore/html/HTMLMediaElement.cpp      | 21 ++++++++++
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 40 +++++++++++++++++++
+ .../platform/graphics/webporn/wpmedia.h       | 12 +++++-
+ 4 files changed, 84 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WTF/wtf/cf/RunLoopCF.cpp b/Source/WTF/wtf/cf/RunLoopCF.cpp
+index 601a30f0ed..b0481e42b8 100644
+--- a/Source/WTF/wtf/cf/RunLoopCF.cpp
++++ b/Source/WTF/wtf/cf/RunLoopCF.cpp
+@@ -31,6 +31,10 @@
+ #include <wtf/AutodrainedPool.h>
+ #include <wtf/SchedulePair.h>
+ 
++#if USE(WEB_THREAD)
++#include <wtf/ios/WebCoreThread.h>
++#endif
++
+ namespace WTF {
+ 
+ static RetainPtr<CFRunLoopTimerRef> createTimer(Seconds interval, bool repeat, void(*timerFired)(CFRunLoopTimerRef, void*), void* info)
+@@ -133,6 +137,14 @@ void RunLoop::TimerBase::start(Seconds interval, bool repeat)
+         if (!CFRunLoopTimerDoesRepeat(cfTimer))
+             CFRunLoopTimerInvalidate(cfTimer);
+ 
++#if USE(WEB_THREAD) && defined(WK26_IOS_TARGET)
++        // WebPorn: as in RunLoop::performWork(), main run loop timers run WebCore
++        // code (MediaSessionManagerCocoa's now-playing update starts Page timers):
++        // take the web lock, which the web thread's observer drops afterwards.
++        if (timer->m_runLoop.ptr() == &RunLoop::mainSingleton() && WebCoreWebThreadIsEnabled && WebCoreWebThreadIsEnabled())
++            WebCoreWebThreadLock();
++#endif
++
+         timer->fired();
+     }, this);
+ 
+diff --git a/Source/WebCore/html/HTMLMediaElement.cpp b/Source/WebCore/html/HTMLMediaElement.cpp
+index 7b53ab3018..259cb9f411 100644
+--- a/Source/WebCore/html/HTMLMediaElement.cpp
++++ b/Source/WebCore/html/HTMLMediaElement.cpp
+@@ -7482,6 +7482,17 @@ void HTMLMediaElement::enterFullscreen(VideoFullscreenMode mode)
+     // WebPorn: see MediaElementSession::requiresFullscreenForVideoPlayback().
+     if (!m_player || !m_player->supportsFullscreen())
+         return;
++    // AVKit's presentation needs iOS 13 on WebKit1: the player shows the video in
++    // a full-screen window of its own when the fullscreen mode reaches it.
++    if (isInWindowOrStandardFullscreen(mode) && is<HTMLVideoElement>(*this)) {
++        if (mediaSession().hasBehaviorRestriction(MediaElementSession::RequireUserGestureForFullscreen))
++            window->consumeTransientActivation();
++        m_temporarilyAllowingInlinePlaybackAfterFullscreen = false;
++        setFullscreenMode(VideoFullscreenModeStandard);
++        configureMediaControls();
++        scheduleEvent(eventNames().webkitbeginfullscreenEvent);
++        return;
++    }
+ #endif
+ 
+     m_changingVideoFullscreenMode = true;
+@@ -7578,6 +7589,16 @@ void HTMLMediaElement::exitFullscreen()
+     ASSERT(m_videoFullscreenMode != VideoFullscreenModeNone);
+     VideoFullscreenMode oldVideoFullscreenMode = m_videoFullscreenMode;
+ 
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: the player's own full-screen window (enterFullscreen).
++    if (m_player && m_player->supportsFullscreen() && isInWindowOrStandardFullscreen(oldVideoFullscreenMode)) {
++        setFullscreenMode(VideoFullscreenModeNone);
++        configureMediaControls();
++        scheduleEvent(eventNames().webkitendfullscreenEvent);
++        return;
++    }
++#endif
++
+     if (!document().page())
+         return;
+ 
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index e9955d7247..4e8e3e467b 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -27,6 +27,7 @@
+ #import "NativeImage.h"
+ #import "Logging.h"
+ #import "MediaPlayerPrivate.h"
++#import "HTMLMediaElement.h"
+ #import "ParsedContentRange.h"
+ #import "PlatformMediaResourceLoader.h"
+ #import "PlatformTimeRanges.h"
+@@ -73,6 +74,7 @@ struct WebPornMediaLibrary {
+     void (*openStream)(wpmedia_player*, const char*, const char*, unsigned long long, int);
+     int (*streamData)(wpmedia_player*, unsigned, const void*, unsigned long);
+     void (*streamEnd)(wpmedia_player*, unsigned, int);
++    void (*setFullscreen)(wpmedia_player*, int);
+ };
+ 
+ static const WebPornMediaLibrary* mediaLibrary()
+@@ -109,6 +111,7 @@ static const WebPornMediaLibrary* mediaLibrary()
+         WP_RESOLVE(openStream, "wpmedia_open_stream");
+         WP_RESOLVE(streamData, "wpmedia_stream_data");
+         WP_RESOLVE(streamEnd, "wpmedia_stream_end");
++        WP_RESOLVE(setFullscreen, "wpmedia_set_fullscreen");
+ #undef WP_RESOLVE
+         library = &functions;
+     });
+@@ -209,6 +212,13 @@ public:
+     void pause() final;
+     bool paused() const final { return m_paused; }
+ 
++    // Full screen without AVKit's presentation (iOS 13 on WebKit1): libWebPornMedia
++    // shows the video in a window of its own; HTMLMediaElement (WK26) drives it
++    // through the video fullscreen mode.
++    bool supportsFullscreen() const final { return true; }
++    void setVideoFullscreenMode(MediaPlayer::VideoFullscreenMode) final;
++    void fullscreenAction(wpmedia_fullscreen_action);
++
+     FloatSize naturalSize() const final { return m_naturalSize; }
+ #if ENABLE(MEDIA_SOURCE)
+     bool hasVideo() const final { return m_mediaSource ? m_mediaSource->hasVideo() : m_hasVideo; }
+@@ -361,6 +371,9 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+     client.first_frame = [](void* context) {
+         bridgeFrom(context).post([](auto& player) { player.firstFrame(); });
+     };
++    client.fullscreen_action = [](void* context, wpmedia_fullscreen_action action) {
++        bridgeFrom(context).post([action](auto& player) { player.fullscreenAction(action); });
++    };
+     client.stream_request = [](void* context, unsigned generation, unsigned long long offset) {
+         bridgeFrom(context).post([generation, offset](auto& player) { player.startStreamLoad(generation, offset); });
+     };
+@@ -910,6 +923,33 @@ void MediaPlayerPrivateWebPorn::frameReady(RetainPtr<CGImageRef>&& frame)
+         m_frame = WTF::move(frame);
+ }
+ 
++void MediaPlayerPrivateWebPorn::setVideoFullscreenMode(MediaPlayer::VideoFullscreenMode mode)
++{
++    if (m_media)
++        m_library.setFullscreen(m_media, mode == HTMLMediaElementEnums::VideoFullscreenModeStandard);
++}
++
++void MediaPlayerPrivateWebPorn::fullscreenAction(wpmedia_fullscreen_action action)
++{
++    // The player has no way to its element; find the element that owns it.
++    RefPtr player = m_player.get();
++    if (!player)
++        return;
++    for (auto& weakElement : HTMLMediaElement::allMediaElements()) {
++        Ref element = weakElement.get();
++        if (element->player() != player.get())
++            continue;
++        if (action == WPMEDIA_FULLSCREEN_EXIT) {
++            if (element->isFullscreen())
++                element->exitFullscreen();
++        } else if (element->paused())
++            element->play();
++        else
++            element->pause();
++        return;
++    }
++}
++
+ void MediaPlayerPrivateWebPorn::firstFrame()
+ {
+     m_hasFirstFrame = true;
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+index c111797fb1..599c74882c 100644
+--- a/Source/WebCore/platform/graphics/webporn/wpmedia.h
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -14,7 +14,7 @@
+ extern "C" {
+ #endif
+ 
+-#define WPMEDIA_ABI_VERSION 3
++#define WPMEDIA_ABI_VERSION 4
+ 
+ typedef struct wpmedia_player wpmedia_player;
+ 
+@@ -34,6 +34,11 @@ typedef enum {
+     WPMEDIA_SUPPORTED,
+ } wpmedia_support;
+ 
++typedef enum {
++    WPMEDIA_FULLSCREEN_EXIT, // the client should leave full screen (and call wpmedia_set_fullscreen 0)
++    WPMEDIA_FULLSCREEN_TOGGLE_PLAYBACK,
++} wpmedia_fullscreen_action;
++
+ typedef struct {
+     void* context;
+     void (*state_changed)(void* context, wpmedia_state);
+@@ -56,6 +61,8 @@ typedef struct {
+     // Last call for this client, after every other callback, once the player is
+     // torn down (some time after wpmedia_destroy): release the context here.
+     void (*release)(void* context);
++    // The viewer used the full-screen window's controls (wpmedia_set_fullscreen).
++    void (*fullscreen_action)(void* context, wpmedia_fullscreen_action);
+ } wpmedia_client;
+ 
+ int wpmedia_abi_version(void);
+@@ -100,6 +107,9 @@ void wpmedia_set_rate(wpmedia_player*, float rate);
+ void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
+ void wpmedia_set_muted(wpmedia_player*, int muted);
+ 
++// Shows the video in a window of its own over the whole screen (turned for a
++// landscape video; a tap shows Done and play/pause), or puts it back in its layer.
++void wpmedia_set_fullscreen(wpmedia_player*, int fullscreen);
+ // The current video frame as a CGImageRef (+1, the caller releases it), at most
+ // max_width pixels wide, or NULL. Blocks for a few hundred milliseconds
+ // (libVLC's snapshot: the frame is read back from the GPU); cache it.

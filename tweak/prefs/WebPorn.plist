@@ -11,7 +11,7 @@
         ALSectionDescriptors = (
             {
                 title = "WebPorn";
-                footer-title = "Apps switched on here load the new WebKit engine (and TLSFix) in place of the system one. Takes effect the next time the app starts.";
+                footer-title = "Apps switched on here load the new WebKit engine in place of the system one. Takes effect the next time the app starts.";
                 items = ();
             },
             {

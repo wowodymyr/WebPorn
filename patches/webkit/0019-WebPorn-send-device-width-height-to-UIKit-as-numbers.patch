@@ -1,0 +1,50 @@
+From 72126e88519f451c3f124aac786b00d5601eeae7 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 10:15:49 +0200
+Subject: [PATCH 19/24] WebPorn: send device-width/height to UIKit as numbers
+ (iOS 8 Safari laid width=device-width pages out 980 wide)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ios/WebCoreSupport/WebChromeClientIOS.mm  | 22 +++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WebKitLegacy/ios/WebCoreSupport/WebChromeClientIOS.mm b/Source/WebKitLegacy/ios/WebCoreSupport/WebChromeClientIOS.mm
+index 7ebe11a87b..5f2c7260e0 100644
+--- a/Source/WebKitLegacy/ios/WebCoreSupport/WebChromeClientIOS.mm
++++ b/Source/WebKitLegacy/ios/WebCoreSupport/WebChromeClientIOS.mm
+@@ -220,14 +220,32 @@ static inline NSString *nameForViewportFitValue(ViewportFit value)
+ 
+ static inline NSDictionary *dictionaryForViewportArguments(const WebCore::ViewportArguments& arguments)
+ {
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: iOS 8 MobileSafari's browser view does not resolve device-width /
++    // device-height (UIWebView does): width=device-width alone laid pages out 980
++    // wide. Send the screen's portrait size instead, which is what they mean.
++    auto resolve = [](float value) -> float {
++        auto screen = WebCore::screenSize();
++        if (value == WebCore::ViewportArguments::ValueDeviceWidth)
++            return std::min(screen.width(), screen.height());
++        if (value == WebCore::ViewportArguments::ValueDeviceHeight)
++            return std::max(screen.width(), screen.height());
++        return value;
++    };
++    float width = resolve(arguments.width);
++    float height = resolve(arguments.height);
++#else
++    float width = arguments.width;
++    float height = arguments.height;
++#endif
+     return @{ WebViewportInitialScaleKey: @(arguments.zoom),
+               WebViewportMinimumScaleKey: @(arguments.minZoom),
+               WebViewportMaximumScaleKey: @(arguments.maxZoom),
+               WebViewportUserScalableKey: @(arguments.userZoom),
+               WebViewportShrinkToFitKey: @(0),
+               WebViewportFitKey: nameForViewportFitValue(arguments.viewportFit),
+-              WebViewportWidthKey: @(arguments.width),
+-              WebViewportHeightKey: @(arguments.height) };
++              WebViewportWidthKey: @(width),
++              WebViewportHeightKey: @(height) };
+ }
+ 
+ FloatSize WebChromeClientIOS::screenSize() const

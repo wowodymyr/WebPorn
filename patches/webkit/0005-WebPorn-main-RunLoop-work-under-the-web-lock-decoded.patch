@@ -1,0 +1,135 @@
+From 200fdf76626667b8d572e2497f9c6d231b7f3207 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 19:50:12 +0200
+Subject: [PATCH 05/24] WebPorn: main RunLoop work under the web lock, decoded
+ images in sRGB on iOS 8
+
+- RunLoop::performWork on the main RunLoop takes the WebThread lock (WK1 iOS
+  posts WebCore work there: NativePromise settlement in HTMLMediaElement
+  asserted in Timer)
+- ImageBackingStoreCG and two more sites use sRGBColorSpaceSingleton():
+  named sRGB is NULL before iOS 9, which left every WebP image blank
+- media engine: platform layer always present, transparent until drawn
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WTF/wtf/RunLoop.cpp                       | 16 ++++++++++++++++
+ Source/WebCore/editing/cocoa/EditorCocoa.mm      |  2 +-
+ .../platform/graphics/cg/ImageBackingStoreCG.cpp |  6 +++++-
+ .../platform/graphics/cg/ImageUtilitiesCG.cpp    |  2 +-
+ .../webporn/MediaPlayerPrivateWebPorn.mm         |  4 ++++
+ 5 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/Source/WTF/wtf/RunLoop.cpp b/Source/WTF/wtf/RunLoop.cpp
+index 092c4d5128..90690044b7 100644
+--- a/Source/WTF/wtf/RunLoop.cpp
++++ b/Source/WTF/wtf/RunLoop.cpp
+@@ -26,6 +26,10 @@
+ #include "config.h"
+ #include <wtf/RunLoop.h>
+ 
++#if USE(WEB_THREAD)
++#include <wtf/ios/WebCoreThread.h>
++#endif
++
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/Ref.h>
+ #include <wtf/StdLibExtras.h>
+@@ -135,6 +139,18 @@ void RunLoop::performWork()
+         m_currentIteration = std::exchange(m_nextIteration, { });
+     }
+ 
++#if USE(WEB_THREAD) && defined(WK26_IOS_TARGET)
++    // WebPorn: WebKit1 on iOS runs WebCore on the WebThread, but WebCore posts a
++    // lot to RunLoop::mainSingleton() (NativePromise settlements, media element
++    // callbacks...) and that code then touches WebCore on the UI thread without
++    // the web lock (Timer asserts: HTMLMediaElement::mediaLoadingFailed). Take
++    // the lock as dispatchAsyncOnMainThreadWithWebThreadLockIfNeeded() does; the
++    // web thread's run loop observer drops it after this iteration.
++    bool takeWebThreadLock = !m_currentIteration.isEmpty() && this == &mainSingleton() && WebCoreWebThreadIsEnabled && WebCoreWebThreadIsEnabled();
++    if (takeWebThreadLock)
++        WebCoreWebThreadLock();
++#endif
++
+     while (!m_currentIteration.isEmpty()) {
+         if (m_isFunctionDispatchSuspended) {
+             didSuspendFunctions = true;
+diff --git a/Source/WebCore/editing/cocoa/EditorCocoa.mm b/Source/WebCore/editing/cocoa/EditorCocoa.mm
+index 74f95d9bc1..c616a030be 100644
+--- a/Source/WebCore/editing/cocoa/EditorCocoa.mm
++++ b/Source/WebCore/editing/cocoa/EditorCocoa.mm
+@@ -432,7 +432,7 @@ static RetainPtr<CGImageRef> fallbackImageForMultiRepresentationHEIC(std::span<c
+ 
+     RetainPtr colorSpace = CGImageGetColorSpace(image.get());
+     if (!CGColorSpaceSupportsOutput(colorSpace.get()))
+-        colorSpace = adoptCF(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
++        colorSpace = sRGBColorSpaceSingleton(); // WK26: named sRGB is NULL before iOS 9
+ 
+     size_t imageWidth = std::ceil(imageSize.width);
+     size_t imageHeight = std::ceil(imageSize.height);
+diff --git a/Source/WebCore/platform/graphics/cg/ImageBackingStoreCG.cpp b/Source/WebCore/platform/graphics/cg/ImageBackingStoreCG.cpp
+index ebd4797c60..720d9fed09 100644
+--- a/Source/WebCore/platform/graphics/cg/ImageBackingStoreCG.cpp
++++ b/Source/WebCore/platform/graphics/cg/ImageBackingStoreCG.cpp
+@@ -26,6 +26,8 @@
+ #include "config.h"
+ #include "ImageBackingStore.h"
+ 
++#include "ColorSpaceCG.h"
++
+ namespace WebCore {
+ 
+ static void dataProviderReleaseCallback(void* info, const void*, size_t)
+@@ -42,7 +44,9 @@ PlatformImagePtr ImageBackingStore::image() const
+     size_t height = size().height();
+     size_t bytesPerRow = bytesPerPixel * width;
+ 
+-    auto colorSpace = adoptCF(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
++    // WK26: sRGBColorSpaceSingleton() falls back to device RGB where named sRGB
++    // (iOS 9+) is NULL; a NULL color space made every decoded WebP image blank.
++    RetainPtr colorSpace = sRGBColorSpaceSingleton();
+     auto dataProvider = adoptCF(CGDataProviderCreateWithData(m_pixels.get(), m_pixelsSpan.data(), height * bytesPerRow, dataProviderReleaseCallback));
+ 
+     if (!dataProvider)
+diff --git a/Source/WebCore/platform/graphics/cg/ImageUtilitiesCG.cpp b/Source/WebCore/platform/graphics/cg/ImageUtilitiesCG.cpp
+index b27a7a43ea..d30b70525e 100644
+--- a/Source/WebCore/platform/graphics/cg/ImageUtilitiesCG.cpp
++++ b/Source/WebCore/platform/graphics/cg/ImageUtilitiesCG.cpp
+@@ -331,7 +331,7 @@ RefPtr<SharedBuffer> createIconDataFromBitmaps(Vector<Ref<ShareableBitmap>>&& bi
+ 
+     constexpr auto icoUTI = "com.microsoft.ico"_s;
+     RetainPtr cfUTI = icoUTI.createCFString();
+-    RetainPtr colorSpace = adoptCF(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
++    RetainPtr colorSpace = sRGBColorSpaceSingleton(); // WK26: named sRGB is NULL before iOS 9
+     RetainPtr destinationData = adoptCF(CFDataCreateMutable(0, 0));
+     RetainPtr destination = adoptCF(CGImageDestinationCreateWithData(destinationData.get(), cfUTI.get(), bitmaps.size(), nullptr));
+ 
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index 35067f723b..ae3e95f932 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -131,6 +131,8 @@ public:
+ #endif
+     void cancelLoad() final;
+ 
++    // Always there: libVLC only creates its video output for a drawable that is
++    // in a window's layer tree. The layer is transparent until libVLC draws.
+     PlatformLayer* platformLayer() const final { return m_layer.get(); }
+     bool supportsAcceleratedRendering() const final { return true; }
+ 
+@@ -192,6 +194,7 @@ private:
+     bool m_ended { false };
+     bool m_hasVideo { false };
+     bool m_hasAudio { false };
++    bool m_hasFirstFrame { false };
+     mutable bool m_loadingProgressed { false };
+ };
+ 
+@@ -442,6 +445,7 @@ void MediaPlayerPrivateWebPorn::bufferingChanged(float)
+ 
+ void MediaPlayerPrivateWebPorn::firstFrame()
+ {
++    m_hasFirstFrame = true;
+     if (RefPtr player = m_player.get())
+         player->firstVideoFrameAvailable();
+ }

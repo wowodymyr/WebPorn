@@ -1,0 +1,73 @@
+From def45502eb472951f0ba2bfc8b9610e60d7e3ab7 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 19:38:11 +0200
+Subject: [PATCH 04/24] WebPorn: WebP through ScalableImageDecoder / libwebp on
+ WK26_IOS_TARGET
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/PlatformIOS.cmake                           | 6 ++++++
+ .../platform/image-decoders/ScalableImageDecoder.cpp       | 7 +++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/Source/WebCore/PlatformIOS.cmake b/Source/WebCore/PlatformIOS.cmake
+index 125d2e1aa5..ee13e8cd41 100644
+--- a/Source/WebCore/PlatformIOS.cmake
++++ b/Source/WebCore/PlatformIOS.cmake
+@@ -61,6 +61,10 @@ foreach (_wp_stub IOSurface IOSurfaceAccelerator GraphicsServices libMobileGesta
+     list(APPEND WebCore_LIBRARIES "${WEBPORN_STUBS_DIR}/${_wp_stub}.tbd")
+ endforeach ()
+ 
++# WebPorn: iOS 8's ImageIO has no WebP; ScalableImageDecoder uses WebCore's own
++# decoder over a decode-only libwebp (toolchain/build-libwebp.sh).
++list(APPEND WebCore_LIBRARIES "${WEBPORN_WEBP_DIR}/lib/libwpwebp.a")
++
+ list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+     "${WEBCORE_DIR}/platform/graphics/cocoa/controls"
+     "${WEBCORE_DIR}/platform/graphics/coretext"
+@@ -141,11 +145,13 @@ list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+ 
+ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+     "${CMAKE_OSX_SYSROOT}/usr/include/libxml2"
++    "${WEBPORN_WEBP_DIR}/include"
+ )
+ 
+ list(APPEND WebCore_SOURCES
+     # WebPorn: <video> / <audio> on libVLC through libWebPornMedia.dylib.
+     platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++    platform/image-decoders/webp/WEBPImageDecoder.cpp
+ 
+     Modules/encryptedmedia/CDM.cpp
+     Modules/encryptedmedia/InitDataRegistry.cpp
+diff --git a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp b/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
+index cc88dfd581..42fcf3bf29 100644
+--- a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
++++ b/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
+@@ -34,6 +34,9 @@
+ #include "JPEGImageDecoder.h"
+ #include "PNGImageDecoder.h"
+ #include "WEBPImageDecoder.h"
++#elif defined(WK26_IOS_TARGET)
++// WebPorn: ImageIO decodes WebP only from iOS 14 on.
++#include "webp/WEBPImageDecoder.h"
+ #endif
+ #if USE(AVIF)
+ #include "AVIFImageDecoder.h"
+@@ -93,6 +96,8 @@ static bool matchesCURSignature(std::span<const uint8_t> contents)
+     return spanHasPrefix(contents, unsafeMakeSpan("\x00\x00\x02\x00", 4));
+ }
+ 
++#endif
++#if !PLATFORM(COCOA) || defined(WK26_IOS_TARGET)
+ static bool matchesWebPSignature(std::span<const uint8_t> contents)
+ {
+     return spanHasPrefix(contents, "RIFF"_span) && spanHasPrefix(contents.subspan(8), "WEBPVP"_span);
+@@ -157,6 +162,8 @@ RefPtr<ScalableImageDecoder> ScalableImageDecoder::create(FragmentedSharedBuffer
+     if (matchesBMPSignature(contentsSpan))
+         return BMPImageDecoder::create(alphaOption, gammaAndColorProfileOption);
+ 
++#endif
++#if !PLATFORM(COCOA) || defined(WK26_IOS_TARGET)
+     if (matchesWebPSignature(contentsSpan))
+         return WEBPImageDecoder::create(alphaOption, gammaAndColorProfileOption);
+ #endif

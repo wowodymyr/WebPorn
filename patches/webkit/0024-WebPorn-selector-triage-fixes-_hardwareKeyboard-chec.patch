@@ -1,0 +1,45 @@
+From 21661765059b8dc1dff203c9e75175cb0b3af610 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 12:11:52 +0200
+Subject: [PATCH 24/24] WebPorn: selector triage fixes (_hardwareKeyboard
+ check, no non-standard full-screen modes on WK26)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/html/HTMLMediaElement.cpp | 4 ++++
+ Source/WebCore/platform/ios/WebEvent.mm  | 7 +++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/Source/WebCore/html/HTMLMediaElement.cpp b/Source/WebCore/html/HTMLMediaElement.cpp
+index 259cb9f411..bf8d2fa4e0 100644
+--- a/Source/WebCore/html/HTMLMediaElement.cpp
++++ b/Source/WebCore/html/HTMLMediaElement.cpp
+@@ -7482,6 +7482,10 @@ void HTMLMediaElement::enterFullscreen(VideoFullscreenMode mode)
+     // WebPorn: see MediaElementSession::requiresFullscreenForVideoPlayback().
+     if (!m_player || !m_player->supportsFullscreen())
+         return;
++    // Picture in picture and the other modes would go to AVKit's presentation
++    // (layout anchors, window scenes: iOS 9-13), which this build cannot use.
++    if (!isInWindowOrStandardFullscreen(mode))
++        return;
+     // AVKit's presentation needs iOS 13 on WebKit1: the player shows the video in
+     // a full-screen window of its own when the fullscreen mode reaches it.
+     if (isInWindowOrStandardFullscreen(mode) && is<HTMLVideoElement>(*this)) {
+diff --git a/Source/WebCore/platform/ios/WebEvent.mm b/Source/WebCore/platform/ios/WebEvent.mm
+index 7dd00eb3ff..189ab756b6 100644
+--- a/Source/WebCore/platform/ios/WebEvent.mm
++++ b/Source/WebCore/platform/ios/WebEvent.mm
+@@ -494,6 +494,13 @@ static NSString *normalizedStringWithAppKitCompatibilityMapping(NSString *charac
+ 
+ + (WebEventFlags)modifierFlags
+ {
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: -[UIApplication _hardwareKeyboard] is newer than iOS 8; without it
++    // there is no keyboard to ask (as when none is attached).
++    id application = [PAL::getUIApplicationClassSingleton() sharedApplication];
++    if (![application respondsToSelector:@selector(_hardwareKeyboard)])
++        return 0;
++#endif
+     return GSEventIsHardwareKeyboardAttached() ? GSKeyboardGetModifierState([PAL::getUIApplicationClassSingleton() sharedApplication]._hardwareKeyboard) : 0;
+ }
+ 

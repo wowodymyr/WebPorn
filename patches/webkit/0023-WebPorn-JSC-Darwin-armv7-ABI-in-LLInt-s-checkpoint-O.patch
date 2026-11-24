@@ -1,0 +1,83 @@
+From e8e98a0c022ab41d80630db5a748fe442ec311c3 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 11:58:39 +0200
+Subject: [PATCH 23/24] WebPorn JSC: Darwin armv7 ABI in LLInt's checkpoint OSR
+ exit from an inlined call (EncodedJSValue in a1:a2, not a2:a3); varargs
+ inlining back on
+
+The trampoline passed the call result the AAPCS way; Apple's ABI does not align
+64-bit arguments to an even register pair, so the slow path read tag and
+payload swapped: a double returned into an inlined varargs call site came back
+as 2.2250744e-308 (JSTests inline-call-varargs.js, timing dependent).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/llint/LLIntOfflineAsmConfig.h |  8 ++++++++
+ Source/JavaScriptCore/llint/LowLevelInterpreter.asm | 12 +++++++++++-
+ Source/JavaScriptCore/runtime/Options.cpp           | 11 -----------
+ 3 files changed, 19 insertions(+), 12 deletions(-)
+
+diff --git a/Source/JavaScriptCore/llint/LLIntOfflineAsmConfig.h b/Source/JavaScriptCore/llint/LLIntOfflineAsmConfig.h
+index 12d202914b..972ba2356d 100644
+--- a/Source/JavaScriptCore/llint/LLIntOfflineAsmConfig.h
++++ b/Source/JavaScriptCore/llint/LLIntOfflineAsmConfig.h
+@@ -65,6 +65,14 @@
+ #define OFFLINE_ASM_ARMv7 0
+ #endif
+ 
++// WebPorn: Apple's ARMv7 ABI does not put 64-bit arguments in even register
++// pairs (AAPCS does); LLInt code that passes an EncodedJSValue to C must know.
++#if CPU(ARM_THUMB2) && OS(DARWIN)
++#define OFFLINE_ASM_ARMv7_DARWIN 1
++#else
++#define OFFLINE_ASM_ARMv7_DARWIN 0
++#endif
++
+ #if CPU(X86_64)
+ #define OFFLINE_ASM_X86_64 1
+ #else
+diff --git a/Source/JavaScriptCore/llint/LowLevelInterpreter.asm b/Source/JavaScriptCore/llint/LowLevelInterpreter.asm
+index 4897373779..132e7adab6 100644
+--- a/Source/JavaScriptCore/llint/LowLevelInterpreter.asm
++++ b/Source/JavaScriptCore/llint/LowLevelInterpreter.asm
+@@ -2949,7 +2949,17 @@ op(checkpoint_osr_exit_from_inlined_call_trampoline, macro ()
+         restoreStackPointerAfterCall()
+ 
+         # Make sure we move r0 to a1 first since r0 might be the same as a0, for instance, on arm.
+-        if ARMv7
++        if ARMv7_DARWIN
++            # WebPorn: Apple's ARMv7 ABI passes the EncodedJSValue right after the
++            # CallFrame*: payload (low word) in a1, tag in a2. With the AAPCS layout
++            # below the function read tag and payload swapped (a double returned
++            # into an inlined varargs call came back with its halves exchanged).
++            # a1 is r1 (the tag): move it out first.
++            move r1, a2
++            move r0, a1
++            move cfr, a0
++            cCall4(_llint_slow_path_checkpoint_osr_exit_from_inlined_call)
++        elsif ARMv7
+             # Given _llint_slow_path_checkpoint_osr_exit_from_inlined_call has
+             # parameters as CallFrame* and EncodedJSValue,
+             # we need to store call result on a2, a3 and call frame on a0,
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index b54a409a3f..964e9a4d81 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -783,17 +783,6 @@ void Options::notifyOptionsChanged()
+     Options::useFTLJIT() = false;
+ #endif
+ 
+-#if USE(JSVALUE32_64) && defined(WK26_IOS_TARGET)
+-    // WebPorn: on armv7 an OSR exit out of an inlined varargs callee hands a
+-    // value back with tag and payload swapped (arguments[i] past the end read as
+-    // 2.1e-314 instead of undefined: JSTests inline-call-varargs.js,
+-    // get-argument-by-val-in-inlined-varargs-call-out-of-bounds.js). Until that
+-    // is found, the DFG does not inline varargs calls; an explicit value other
+-    // than the default still applies.
+-    if (Options::maximumVarargsForInlining() == 100)
+-        Options::maximumVarargsForInlining() = 0;
+-#endif
+-
+ #if CPU(RISCV64)
+     // On RISCV64, JIT levels are enabled at build-time to simplify building JSC, avoiding
+     // otherwise rare combinations of build-time configuration. FTL on RISCV64 is disabled

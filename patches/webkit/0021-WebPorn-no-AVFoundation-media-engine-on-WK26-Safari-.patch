@@ -1,0 +1,132 @@
+From 8c4368668e37c1fabd0589504a1a5267d3aea05b Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 11:28:32 +0200
+Subject: [PATCH 21/24] WebPorn: no AVFoundation media engine on WK26 (Safari
+ turned it on; crashed on iOS 8), modern Safari tokens in the UA, Safari's
+ default-on features in WebKitLegacy (MediaCapabilities, Navigation API, lazy
+ loading...), MediaCapabilities for H.264 without VTIsHardwareDecodeSupported
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../WebCore/platform/graphics/MediaPlayer.cpp |  8 +++++
+ .../MediaEngineConfigurationFactoryCocoa.cpp  |  9 ++++++
+ Source/WebCore/platform/ios/UserAgentIOS.mm   | 31 ++++++++++++++++++-
+ .../mac/WebView/WebPreferences.mm             | 15 +++++++++
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index 0c723c17db..8c176f3e00 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -342,7 +342,15 @@ static void buildMediaEnginesVector() WTF_REQUIRES_LOCK(mediaEngineVectorLock)
+         registerRemoteEngine(addMediaEngine, MediaPlayerEnums::MediaEngineIdentifier::MockMSE);
+ #endif
+ 
++    // WebPorn: AVFoundation's engine needs iOS 9+ AVURLAsset options and resource
++    // loader SPI (it threw in createAVAssetForURL on iOS 8); libVLC plays instead.
++    // Safari's own preferences turned it back on, and with an unknown MIME type
++    // (a signed .mp4?query URL) the first engine is used: not registered at all.
++#if defined(WK26_IOS_TARGET)
++    if (false) {
++#else
+     if (DeprecatedGlobalSettings::isAVFoundationEnabled()) {
++#endif
+         if (registerRemoteEngine)
+             registerRemoteEngine(addMediaEngine, MediaPlayerEnums::MediaEngineIdentifier::AVFoundation);
+         else
+diff --git a/Source/WebCore/platform/graphics/cocoa/MediaEngineConfigurationFactoryCocoa.cpp b/Source/WebCore/platform/graphics/cocoa/MediaEngineConfigurationFactoryCocoa.cpp
+index 43e4f93997..d7d4af5a2f 100644
+--- a/Source/WebCore/platform/graphics/cocoa/MediaEngineConfigurationFactoryCocoa.cpp
++++ b/Source/WebCore/platform/graphics/cocoa/MediaEngineConfigurationFactoryCocoa.cpp
+@@ -139,6 +139,15 @@ static std::optional<MediaCapabilitiesInfo> computeMediaCapabilitiesInfo(const M
+             if (alphaChannel || hdrSupported)
+                 return std::nullopt;
+ 
++#if defined(WK26_IOS_TARGET)
++            // WebPorn: VTIsHardwareDecodeSupported is iOS 11; libVLC decodes H.264
++            // on VideoToolbox and keeps up with 1080p30 on the A6 (the same limits
++            // as the media source's isTypeSupported).
++            if (videoCodecType == kCMVideoCodecType_H264) {
++                info.powerEfficient = true;
++                info.smooth = videoConfiguration.height <= 1080 && videoConfiguration.width <= 1920 && videoConfiguration.framerate <= 30.5;
++            }
++#endif
+             if (canLoad_VideoToolbox_VTIsHardwareDecodeSupported()) {
+                 info.powerEfficient = VTIsHardwareDecodeSupported(videoCodecType);
+                 info.smooth = true;
+diff --git a/Source/WebCore/platform/ios/UserAgentIOS.mm b/Source/WebCore/platform/ios/UserAgentIOS.mm
+index 8b52f735ec..387bb3f252 100644
+--- a/Source/WebCore/platform/ios/UserAgentIOS.mm
++++ b/Source/WebCore/platform/ios/UserAgentIOS.mm
+@@ -36,6 +36,7 @@
+ #import <wtf/RetainPtr.h>
+ #import <wtf/RuntimeApplicationChecks.h>
+ #import <wtf/cf/TypeCastsCF.h>
++#import <wtf/text/StringBuilder.h>
+ #import <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
+ #import <wtf/text/MakeString.h>
+ 
+@@ -85,8 +86,36 @@ static StringView deviceNameForUserAgent()
+     return name.get();
+ }
+ 
+-String standardUserAgentWithApplicationName(const String& applicationName, const String& userAgentOSVersion, UserAgentType type)
++#if defined(WK26_IOS_TARGET)
++// WebPorn: iOS 8 Safari names itself "Version/8.0 Mobile/12H321 Safari/600.1.4";
++// next to the engine's iOS 18 that reads as an ancient Safari, and sites turn it
++// away (Dailymotion: "no longer supports your browser"). Match the engine.
++static String modernizedApplicationName(const String& applicationName, const String& userAgentOSVersion)
+ {
++    if (!applicationName.contains("Safari/"_s) && !applicationName.contains("Version/"_s))
++        return applicationName;
++    StringBuilder builder;
++    for (auto& token : applicationName.split(' ')) {
++        if (!builder.isEmpty())
++            builder.append(' ');
++        if (token.startsWith("Version/"_s))
++            builder.append("Version/"_s, userAgentOSVersion.isEmpty() ? String(systemMarketingVersion()) : makeStringByReplacingAll(userAgentOSVersion, '_', '.'));
++        else if (token.startsWith("Safari/"_s))
++            builder.append("Safari/604.1"_s);
++        else
++            builder.append(token);
++    }
++    return builder.toString();
++}
++#endif
++
++String standardUserAgentWithApplicationName(const String& rawApplicationName, const String& userAgentOSVersion, UserAgentType type)
++{
++#if defined(WK26_IOS_TARGET)
++    auto applicationName = modernizedApplicationName(rawApplicationName, userAgentOSVersion);
++#else
++    auto& applicationName = rawApplicationName;
++#endif
+     String overrideUserAgent = Quirks::standardUserAgentWithApplicationNameIncludingCompatOverrides(applicationName, userAgentOSVersion, type);
+     if (overrideUserAgent.length())
+         return overrideUserAgent;
+diff --git a/Source/WebKitLegacy/mac/WebView/WebPreferences.mm b/Source/WebKitLegacy/mac/WebView/WebPreferences.mm
+index 3d3daf8347..7849bd95a4 100644
+--- a/Source/WebKitLegacy/mac/WebView/WebPreferences.mm
++++ b/Source/WebKitLegacy/mac/WebView/WebPreferences.mm
+@@ -427,6 +427,21 @@ public:
+ #if !PLATFORM(IOS_FAMILY)
+     // This value shouldn't ever change, which is assumed in the initialization of WebKitPDFDisplayModePreferenceKey above
+     ASSERT(kPDFDisplaySinglePageContinuous == 1);
++#endif
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: features Safari ships (on by default in WebKit) that WebKitLegacy
++    // leaves off, and that need nothing WebKit1 lacks (no service or shared
++    // workers). Pages test for them: Dailymotion's player waited forever on
++    // navigator.mediaCapabilities.decodingInfo.
++    NSMutableDictionary *modern = [dict mutableCopy];
++    for (NSString *key in @[ @"WebKitMediaCapabilitiesEnabled", @"WebKitNavigationAPIEnabled", @"WebKitBeaconAPIEnabled",
++        @"WebKitBroadcastChannelEnabled", @"WebKitCompressionStreamEnabled", @"WebKitEventTimingEnabled",
++        @"WebKitLazyIframeLoadingEnabled", @"WebKitLazyImageLoadingEnabled", @"WebKitScrollendEventEnabled",
++        @"WebKitUserActivationAPIEnabled", @"WebKitWebLocksAPIEnabled", @"WebKitCSSScrollbarGutterEnabled",
++        @"WebKitCSSScrollbarWidthEnabled", @"WebKitTargetTextPseudoElementEnabled", @"WebKitScrollToTextFragmentEnabled",
++        @"WebKitScrollToTextFragmentFeatureDetectionEnabled", @"WebKitScrollDrivenAnimationsEnabled" ])
++        modern[key] = @YES;
++    dict = modern;
+ #endif
+     [[NSUserDefaults standardUserDefaults] registerDefaults:dict];
+ }

@@ -1,0 +1,74 @@
+From 47245d7b289edb3b4c7ace8e770a821f1e0bf00c Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:57:17 +0200
+Subject: [PATCH 17/24] WebPorn MSE: skip non-reference pictures before a seek
+ target, mark them Discardable (post-seek drops 127 -> 60)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../graphics/webporn/WebPornMediaSource.cpp   | 38 ++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+index 218138da1f..defcf19e2d 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+@@ -1005,6 +1005,35 @@ static int64_t milliseconds(const MediaTime& time)
+     return std::max<int64_t>(0, llround(time.toDouble() * 1000));
+ }
+ 
++// An H.264 picture no other picture refers to (nal_ref_idc 0 in every slice):
++// typically a B-frame.
++static bool isNonReferencePicture(const WebPornMediaSample& sample)
++{
++    auto& config = sample.config();
++    if (!config.isVideo())
++        return false;
++    auto data = sample.data();
++    bool sawSlice = false;
++    size_t offset = 0;
++    while (offset + config.nalLengthSize < data.size()) {
++        size_t length = 0;
++        for (unsigned i = 0; i < config.nalLengthSize; i++)
++            length = (length << 8) | data[offset + i];
++        offset += config.nalLengthSize;
++        if (!length || length > data.size() - offset)
++            return false;
++        uint8_t header = data[offset];
++        unsigned type = header & 0x1f;
++        if (type >= 1 && type <= 5) {
++            if (header & 0x60)
++                return false;
++            sawSlice = true;
++        }
++        offset += length;
++    }
++    return sawSlice;
++}
++
+ void WebPornMatroskaMuxer::writeBlock(Track& track, WebPornMediaSample& sample)
+ {
+     auto presentationTime = sample.presentationTime();
+@@ -1035,7 +1064,9 @@ void WebPornMatroskaMuxer::writeBlock(Track& track, WebPornMediaSample& sample)
+     m_cluster.append(uint8_t(0x80 | track.number)); // track number as a one-byte vint
+     m_cluster.append(uint8_t(uint16_t(relative) >> 8));
+     m_cluster.append(uint8_t(relative));
+-    m_cluster.append(uint8_t(sample.flags() & MediaSample::IsSync ? 0x80 : 0x00));
++    // Keyframe, and Discardable for non-reference pictures: libVLC takes the PTS of
++    // those (and of key frames) as their DTS instead of estimating it.
++    m_cluster.append(uint8_t((sample.flags() & MediaSample::IsSync ? 0x80 : 0x00) | (isNonReferencePicture(sample) ? 0x01 : 0x00)));
+     if (prependParameterSets)
+         m_cluster.append(config.parameterSets.span());
+     m_cluster.append(data);
+@@ -1104,7 +1135,10 @@ void WebPornMatroskaMuxer::pump()
+                 break;
+         }
+         Ref sample = next->queue.takeFirst();
+-        bool drop = (sample->flags() & MediaSample::IsNonDisplaying) && !next->config->isVideo();
++        // Not shown and nothing depends on them: audio before the target, and
++        // non-reference pictures between the key frame and the target (half or
++        // more of the frames libVLC would decode and then drop as late).
++        bool drop = (sample->flags() & MediaSample::IsNonDisplaying) && (!next->config->isVideo() || isNonReferencePicture(sample));
+         if (!drop)
+             writeBlock(*next, sample);
+         if (m_clusterBlocks >= 32 && !flushCluster()) {

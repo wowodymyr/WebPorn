@@ -1,0 +1,33 @@
+From 93d2b22aad376349c290b53df93ae634dcefd387 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 19:57:46 +0200
+Subject: [PATCH 06/24] WebPorn: no DFG varargs inlining on armv7 (swapped
+ tag/payload after OSR exit)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/runtime/Options.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 964e9a4d81..b54a409a3f 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -783,6 +783,17 @@ void Options::notifyOptionsChanged()
+     Options::useFTLJIT() = false;
+ #endif
+ 
++#if USE(JSVALUE32_64) && defined(WK26_IOS_TARGET)
++    // WebPorn: on armv7 an OSR exit out of an inlined varargs callee hands a
++    // value back with tag and payload swapped (arguments[i] past the end read as
++    // 2.1e-314 instead of undefined: JSTests inline-call-varargs.js,
++    // get-argument-by-val-in-inlined-varargs-call-out-of-bounds.js). Until that
++    // is found, the DFG does not inline varargs calls; an explicit value other
++    // than the default still applies.
++    if (Options::maximumVarargsForInlining() == 100)
++        Options::maximumVarargsForInlining() = 0;
++#endif
++
+ #if CPU(RISCV64)
+     // On RISCV64, JIT levels are enabled at build-time to simplify building JSC, avoiding
+     // otherwise rare combinations of build-time configuration. FTL on RISCV64 is disabled

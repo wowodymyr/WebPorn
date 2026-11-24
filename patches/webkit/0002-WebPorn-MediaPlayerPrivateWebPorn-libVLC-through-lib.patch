@@ -1,0 +1,720 @@
+From bde40eb6e23135e4968fdabc25ea8fa00a88be01 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 19:21:38 +0200
+Subject: [PATCH 02/24] WebPorn: MediaPlayerPrivateWebPorn (libVLC through
+ libWebPornMedia)
+
+Registered on WK26_IOS_TARGET when /var/webporn/lib/libWebPornMedia.dylib
+loads; video plays inline (the WebKit1 fullscreen path needs iOS 13 AVKit).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/PlatformIOS.cmake              |   3 +
+ Source/WebCore/html/HTMLMediaElement.cpp      |   6 +
+ Source/WebCore/html/MediaElementSession.cpp   |   5 +
+ .../WebCore/platform/graphics/MediaPlayer.cpp |   9 +
+ .../webporn/MediaPlayerPrivateWebPorn.h       |  19 +
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 505 ++++++++++++++++++
+ .../platform/graphics/webporn/wpmedia.h       |  81 +++
+ 7 files changed, 628 insertions(+)
+ create mode 100644 Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.h
+ create mode 100644 Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+ create mode 100644 Source/WebCore/platform/graphics/webporn/wpmedia.h
+
+diff --git a/Source/WebCore/PlatformIOS.cmake b/Source/WebCore/PlatformIOS.cmake
+index f817d4d427..125d2e1aa5 100644
+--- a/Source/WebCore/PlatformIOS.cmake
++++ b/Source/WebCore/PlatformIOS.cmake
+@@ -144,6 +144,9 @@ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+ )
+ 
+ list(APPEND WebCore_SOURCES
++    # WebPorn: <video> / <audio> on libVLC through libWebPornMedia.dylib.
++    platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++
+     Modules/encryptedmedia/CDM.cpp
+     Modules/encryptedmedia/InitDataRegistry.cpp
+     Modules/encryptedmedia/MediaKeyMessageEvent.cpp
+diff --git a/Source/WebCore/html/HTMLMediaElement.cpp b/Source/WebCore/html/HTMLMediaElement.cpp
+index 3ae16b3202..7b53ab3018 100644
+--- a/Source/WebCore/html/HTMLMediaElement.cpp
++++ b/Source/WebCore/html/HTMLMediaElement.cpp
+@@ -7478,6 +7478,12 @@ void HTMLMediaElement::enterFullscreen(VideoFullscreenMode mode)
+     if (m_waitingToEnterFullscreen)
+         return;
+ 
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: see MediaElementSession::requiresFullscreenForVideoPlayback().
++    if (!m_player || !m_player->supportsFullscreen())
++        return;
++#endif
++
+     m_changingVideoFullscreenMode = true;
+ 
+     fireAndRestartWatchtimeTimer();
+diff --git a/Source/WebCore/html/MediaElementSession.cpp b/Source/WebCore/html/MediaElementSession.cpp
+index fdfb1bbac9..8a44b48c55 100644
+--- a/Source/WebCore/html/MediaElementSession.cpp
++++ b/Source/WebCore/html/MediaElementSession.cpp
+@@ -1044,6 +1044,11 @@ MediaPlayer::Preload MediaElementSession::effectivePreloadForElement() const
+ 
+ bool MediaElementSession::requiresFullscreenForVideoPlayback() const
+ {
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: the WebKit1 fullscreen path (VideoPresentationInterfaceIOS) needs
++    // AVKit / UIKit of iOS 13+; video always plays inline.
++    return false;
++#endif
+     RefPtr element = m_element.get();
+     if (!element)
+         return false;
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index 912a512f8c..0c723c17db 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -102,6 +102,10 @@
+ 
+ #endif // PLATFORM(COCOA)
+ 
++#if defined(WK26_IOS_TARGET)
++#include "webporn/MediaPlayerPrivateWebPorn.h"
++#endif
++
+ #if USE(EXTERNAL_HOLEPUNCH)
+ #include "MediaPlayerPrivateHolePunch.h"
+ #endif
+@@ -368,6 +372,11 @@ static void buildMediaEnginesVector() WTF_REQUIRES_LOCK(mediaEngineVectorLock)
+     }
+ #endif // USE(AVFOUNDATION)
+ 
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: libVLC (libWebPornMedia.dylib), when it is installed.
++    registerWebPornMediaEngine(addMediaEngine);
++#endif
++
+ #if USE(GSTREAMER)
+     if (DeprecatedGlobalSettings::isGStreamerEnabled()) {
+         MediaPlayerPrivateGStreamer::registerMediaEngine(addMediaEngine);
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.h b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.h
+new file mode 100644
+index 0000000000..c490946f2d
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.h
+@@ -0,0 +1,19 @@
++/*
++ * WebPorn: the media engine for jailbroken iOS 8-10. <video> and <audio> play
++ * through libVLC, which lives in /var/webporn/lib/libWebPornMedia.dylib behind
++ * the C ABI in wpmedia.h; the engine only registers when that library loads.
++ */
++
++#pragma once
++
++#if defined(WK26_IOS_TARGET)
++
++#include "MediaPlayer.h"
++
++namespace WebCore {
++
++void registerWebPornMediaEngine(MediaEngineRegistrar);
++
++} // namespace WebCore
++
++#endif
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+new file mode 100644
+index 0000000000..8d03dd5e7e
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -0,0 +1,505 @@
++/*
++ * WebPorn: the media engine for jailbroken iOS 8-10, see MediaPlayerPrivateWebPorn.h.
++ *
++ * libWebPornMedia preloads (opens the media muted, keeps the first frame,
++ * pauses at the start) and draws the video itself into a CALayer, which is this
++ * engine's platform layer. Its callbacks come from libVLC's threads; a bridge
++ * object takes them to the main thread and drops them once the player is gone.
++ */
++
++#import "config.h"
++#import "MediaPlayerPrivateWebPorn.h"
++
++#if defined(WK26_IOS_TARGET)
++
++#import "DestinationColorSpace.h"
++#import "Logging.h"
++#import "MediaPlayerPrivate.h"
++#import "PlatformTimeRanges.h"
++#import "wpmedia.h"
++#import <QuartzCore/QuartzCore.h>
++#import <dlfcn.h>
++#import <wtf/MainThread.h>
++#import <wtf/MonotonicTime.h>
++#import <wtf/NeverDestroyed.h>
++#import <wtf/RetainPtr.h>
++#import <wtf/TZoneMallocInlines.h>
++#import <wtf/ThreadSafeRefCounted.h>
++#import <wtf/text/StringBuilder.h>
++
++namespace WebCore {
++
++// MARK: - libWebPornMedia
++
++struct WebPornMediaLibrary {
++    wpmedia_support (*supports)(const char*, const char*);
++    wpmedia_player* (*create)(const wpmedia_client*);
++    void (*destroy)(wpmedia_player*);
++    void* (*layer)(wpmedia_player*);
++    void (*open)(wpmedia_player*, const char*, const char*, const char*, const char*);
++    void (*play)(wpmedia_player*);
++    void (*pause)(wpmedia_player*);
++    void (*seek)(wpmedia_player*, double);
++    double (*time)(wpmedia_player*);
++    void (*setRate)(wpmedia_player*, float);
++    void (*setVolume)(wpmedia_player*, float);
++    void (*setMuted)(wpmedia_player*, int);
++};
++
++static const WebPornMediaLibrary* mediaLibrary()
++{
++    static const WebPornMediaLibrary* library;
++    static std::once_flag once;
++    std::call_once(once, [] {
++        void* handle = dlopen("/var/webporn/lib/libWebPornMedia.dylib", RTLD_NOW | RTLD_LOCAL);
++        if (!handle) {
++            WTFLogAlways("WebPorn media: %s", dlerror());
++            return;
++        }
++        auto version = reinterpret_cast<int (*)()>(dlsym(handle, "wpmedia_abi_version"));
++        if (!version || version() != WPMEDIA_ABI_VERSION) {
++            WTFLogAlways("WebPorn media: libWebPornMedia ABI %d, want %d", version ? version() : -1, WPMEDIA_ABI_VERSION);
++            return;
++        }
++        static WebPornMediaLibrary functions;
++#define WP_RESOLVE(field, name) functions.field = reinterpret_cast<decltype(functions.field)>(dlsym(handle, name)); if (!functions.field) return;
++        WP_RESOLVE(supports, "wpmedia_supports");
++        WP_RESOLVE(create, "wpmedia_create");
++        WP_RESOLVE(destroy, "wpmedia_destroy");
++        WP_RESOLVE(layer, "wpmedia_layer");
++        WP_RESOLVE(open, "wpmedia_open");
++        WP_RESOLVE(play, "wpmedia_play");
++        WP_RESOLVE(pause, "wpmedia_pause");
++        WP_RESOLVE(seek, "wpmedia_seek");
++        WP_RESOLVE(time, "wpmedia_time");
++        WP_RESOLVE(setRate, "wpmedia_set_rate");
++        WP_RESOLVE(setVolume, "wpmedia_set_volume");
++        WP_RESOLVE(setMuted, "wpmedia_set_muted");
++#undef WP_RESOLVE
++        library = &functions;
++    });
++    return library;
++}
++
++// MARK: - Player
++
++class MediaPlayerPrivateWebPorn;
++
++class WebPornMediaBridge : public ThreadSafeRefCounted<WebPornMediaBridge> {
++public:
++    static Ref<WebPornMediaBridge> create(MediaPlayerPrivateWebPorn& player) { return adoptRef(*new WebPornMediaBridge(player)); }
++
++    // Main thread only, like the player.
++    void detach() { m_player = nullptr; }
++
++    template<typename Function> void post(Function&& function)
++    {
++        callOnMainThread([protectedThis = Ref { *this }, function = WTF::move(function)]() mutable {
++            if (auto* player = protectedThis->m_player)
++                function(*player);
++        });
++    }
++
++private:
++    explicit WebPornMediaBridge(MediaPlayerPrivateWebPorn& player)
++        : m_player(&player)
++    {
++    }
++
++    MediaPlayerPrivateWebPorn* m_player;
++};
++
++class MediaPlayerPrivateWebPorn final : public MediaPlayerPrivateInterface, public RefCounted<MediaPlayerPrivateWebPorn> {
++    WTF_MAKE_TZONE_ALLOCATED(MediaPlayerPrivateWebPorn);
++public:
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++
++    explicit MediaPlayerPrivateWebPorn(MediaPlayer&);
++    ~MediaPlayerPrivateWebPorn();
++
++    // Reuses HolePunch's identity: that engine is not built here (no
++    // USE(EXTERNAL_HOLEPUNCH)) and only WebKit2 looks at the value.
++    constexpr MediaPlayerType mediaPlayerType() const final { return MediaPlayerType::HolePunch; }
++
++    void load(const String&) final;
++#if ENABLE(MEDIA_SOURCE)
++    void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) final { setNetworkState(MediaPlayer::NetworkState::FormatError); }
++#endif
++#if ENABLE(MEDIA_STREAM)
++    void load(MediaStreamPrivate&) final { setNetworkState(MediaPlayer::NetworkState::FormatError); }
++#endif
++    void cancelLoad() final;
++
++    PlatformLayer* platformLayer() const final { return m_layer.get(); }
++    bool supportsAcceleratedRendering() const final { return true; }
++
++    void play() final;
++    void pause() final;
++    bool paused() const final { return m_paused; }
++
++    FloatSize naturalSize() const final { return m_naturalSize; }
++    bool hasVideo() const final { return m_hasVideo; }
++    bool hasAudio() const final { return m_hasAudio; }
++    void setPageIsVisible(bool) final { }
++
++    MediaTime duration() const final { return m_duration > 0 ? MediaTime::createWithDouble(m_duration) : MediaTime::zeroTime(); }
++    MediaTime currentTime() const final;
++    MediaTime maxTimeSeekable() const final { return duration(); }
++    void seekToTarget(const SeekTarget&) final;
++    bool seeking() const final { return m_seeking; }
++
++    void setRateDouble(double) final;
++    double rate() const final { return m_paused ? 0 : m_rate; }
++    void setVolume(float) final;
++    void setMuted(bool) final;
++
++    MediaPlayer::NetworkState networkState() const final { return m_networkState; }
++    MediaPlayer::ReadyState readyState() const final { return m_readyState; }
++    const PlatformTimeRanges& buffered() const final { return m_buffered; }
++    bool didLoadingProgress() const final;
++
++    void paint(GraphicsContext&, const FloatRect&) final { }
++    DestinationColorSpace colorSpace() final { return DestinationColorSpace::SRGB(); }
++
++    // From libWebPornMedia, on the main thread.
++    void stateChanged(wpmedia_state);
++    void metadataChanged(double duration, FloatSize, bool hasVideo, bool hasAudio);
++    void timeChanged(double);
++    void bufferingChanged(float);
++    void firstFrame();
++
++private:
++    void setNetworkState(MediaPlayer::NetworkState);
++    void setReadyState(MediaPlayer::ReadyState);
++
++    ThreadSafeWeakPtr<MediaPlayer> m_player;
++    const WebPornMediaLibrary& m_library;
++    Ref<WebPornMediaBridge> m_bridge;
++    wpmedia_player* m_media { nullptr };
++    RetainPtr<CALayer> m_layer;
++    MediaPlayer::NetworkState m_networkState { MediaPlayer::NetworkState::Empty };
++    MediaPlayer::ReadyState m_readyState { MediaPlayer::ReadyState::HaveNothing };
++    PlatformTimeRanges m_buffered;
++    FloatSize m_naturalSize;
++    double m_duration { 0 };
++    double m_time { 0 };
++    MonotonicTime m_timeUpdated;
++    double m_rate { 1 };
++    bool m_paused { true };
++    bool m_seeking { false };
++    bool m_awaitingTimeAfterSeek { false };
++    bool m_ended { false };
++    bool m_hasVideo { false };
++    bool m_hasAudio { false };
++    mutable bool m_loadingProgressed { false };
++};
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaPlayerPrivateWebPorn);
++
++static WebPornMediaBridge& bridgeFrom(void* context) { return *static_cast<WebPornMediaBridge*>(context); }
++
++MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
++    : m_player(player)
++    , m_library(*mediaLibrary())
++    , m_bridge(WebPornMediaBridge::create(*this))
++{
++    wpmedia_client client { };
++    client.context = &m_bridge.get();
++    client.state_changed = [](void* context, wpmedia_state state) {
++        bridgeFrom(context).post([state](auto& player) { player.stateChanged(state); });
++    };
++    client.metadata_changed = [](void* context, double duration, unsigned width, unsigned height, int hasVideo, int hasAudio) {
++        bridgeFrom(context).post([=](auto& player) { player.metadataChanged(duration, FloatSize(width, height), hasVideo, hasAudio); });
++    };
++    client.time_changed = [](void* context, double seconds) {
++        bridgeFrom(context).post([seconds](auto& player) { player.timeChanged(seconds); });
++    };
++    client.buffering = [](void* context, float percent) {
++        bridgeFrom(context).post([percent](auto& player) { player.bufferingChanged(percent); });
++    };
++    client.first_frame = [](void* context) {
++        bridgeFrom(context).post([](auto& player) { player.firstFrame(); });
++    };
++    m_media = m_library.create(&client);
++    if (m_media)
++        m_layer = (__bridge CALayer *)m_library.layer(m_media);
++}
++
++MediaPlayerPrivateWebPorn::~MediaPlayerPrivateWebPorn()
++{
++    m_bridge->detach();
++    // No callback runs after destroy returns; queued ones find the bridge detached.
++    if (m_media)
++        m_library.destroy(m_media);
++}
++
++void MediaPlayerPrivateWebPorn::load(const String& url)
++{
++    RefPtr player = m_player.get();
++    if (!player || !m_media) {
++        setNetworkState(MediaPlayer::NetworkState::FormatError);
++        return;
++    }
++    setNetworkState(MediaPlayer::NetworkState::Loading);
++    setReadyState(MediaPlayer::ReadyState::HaveNothing);
++    m_library.open(m_media, url.utf8().data(), player->contentMIMEType().utf8().data(), player->userAgent().utf8().data(), player->referrer().utf8().data());
++}
++
++void MediaPlayerPrivateWebPorn::cancelLoad()
++{
++    if (m_media)
++        m_library.pause(m_media);
++}
++
++void MediaPlayerPrivateWebPorn::play()
++{
++    if (!m_media)
++        return;
++    m_paused = false;
++    m_timeUpdated = MonotonicTime::now();
++    m_library.play(m_media);
++    if (RefPtr player = m_player.get()) {
++        player->rateChanged();
++        player->playbackStateChanged();
++    }
++}
++
++void MediaPlayerPrivateWebPorn::pause()
++{
++    if (!m_media)
++        return;
++    m_time = currentTime().toDouble();
++    m_paused = true;
++    m_library.pause(m_media);
++    if (RefPtr player = m_player.get()) {
++        player->rateChanged();
++        player->playbackStateChanged();
++    }
++}
++
++MediaTime MediaPlayerPrivateWebPorn::currentTime() const
++{
++    // libVLC reports the time a few times a second; run the clock in between.
++    double time = m_time;
++    if (!m_paused && !m_seeking && !m_awaitingTimeAfterSeek && !m_ended && m_readyState >= MediaPlayer::ReadyState::HaveEnoughData)
++        time += (MonotonicTime::now() - m_timeUpdated).seconds() * m_rate;
++    if (m_duration > 0 && time > m_duration)
++        time = m_duration;
++    return MediaTime::createWithDouble(std::max(time, 0.0));
++}
++
++void MediaPlayerPrivateWebPorn::seekToTarget(const SeekTarget& target)
++{
++    if (!m_media)
++        return;
++    double time = target.time.toDouble();
++    m_seeking = true;
++    m_awaitingTimeAfterSeek = true; // the clock stands still until libVLC has landed
++    m_ended = false;
++    m_time = time;
++    m_timeUpdated = MonotonicTime::now();
++    m_library.seek(m_media, time);
++    // libVLC seeks without telling when it is done while paused: finish the
++    // seek from WebCore's point of view right away (the clock restarts at the
++    // target; libVLC's next time update corrects it).
++    m_bridge->post([time](auto& player) {
++        if (!player.m_seeking)
++            return;
++        player.m_seeking = false;
++        player.m_timeUpdated = MonotonicTime::now();
++        if (RefPtr mediaPlayer = player.m_player.get()) {
++            mediaPlayer->seeked(MediaTime::createWithDouble(time));
++            mediaPlayer->timeChanged();
++        }
++    });
++}
++
++void MediaPlayerPrivateWebPorn::setRateDouble(double rate)
++{
++    m_time = currentTime().toDouble();
++    m_timeUpdated = MonotonicTime::now();
++    m_rate = rate;
++    if (m_media)
++        m_library.setRate(m_media, rate);
++}
++
++void MediaPlayerPrivateWebPorn::setVolume(float volume)
++{
++    if (m_media)
++        m_library.setVolume(m_media, volume);
++}
++
++void MediaPlayerPrivateWebPorn::setMuted(bool muted)
++{
++    if (m_media)
++        m_library.setMuted(m_media, muted);
++}
++
++bool MediaPlayerPrivateWebPorn::didLoadingProgress() const
++{
++    bool progressed = m_loadingProgressed;
++    m_loadingProgressed = false;
++    return progressed;
++}
++
++void MediaPlayerPrivateWebPorn::setNetworkState(MediaPlayer::NetworkState state)
++{
++    if (m_networkState == state)
++        return;
++    m_networkState = state;
++    if (RefPtr player = m_player.get())
++        player->networkStateChanged();
++}
++
++void MediaPlayerPrivateWebPorn::setReadyState(MediaPlayer::ReadyState state)
++{
++    if (m_readyState == state)
++        return;
++    m_readyState = state;
++    if (RefPtr player = m_player.get())
++        player->readyStateChanged();
++}
++
++// MARK: - Callbacks
++
++void MediaPlayerPrivateWebPorn::stateChanged(wpmedia_state state)
++{
++    RefPtr player = m_player.get();
++    switch (state) {
++    case WPMEDIA_STATE_PLAYING:
++    case WPMEDIA_STATE_PAUSED:
++        // The first of these ends the preload: the first frame is decoded.
++        if (m_readyState < MediaPlayer::ReadyState::HaveEnoughData) {
++            if (m_readyState < MediaPlayer::ReadyState::HaveMetadata)
++                setReadyState(MediaPlayer::ReadyState::HaveMetadata);
++            setReadyState(MediaPlayer::ReadyState::HaveEnoughData);
++            setNetworkState(MediaPlayer::NetworkState::Idle);
++        }
++        break;
++    case WPMEDIA_STATE_ENDED:
++        m_ended = true;
++        m_paused = true;
++        if (m_duration > 0)
++            m_time = m_duration;
++        if (player) {
++            player->rateChanged();
++            player->timeChanged();
++        }
++        break;
++    case WPMEDIA_STATE_ERROR:
++        setNetworkState(m_readyState == MediaPlayer::ReadyState::HaveNothing ? MediaPlayer::NetworkState::FormatError : MediaPlayer::NetworkState::DecodeError);
++        break;
++    default:
++        break;
++    }
++}
++
++void MediaPlayerPrivateWebPorn::metadataChanged(double duration, FloatSize size, bool hasVideo, bool hasAudio)
++{
++    RefPtr player = m_player.get();
++    if (!player)
++        return;
++    bool durationChanged = duration != m_duration;
++    bool sizeChanged = size != m_naturalSize;
++    bool characteristicsChanged = hasVideo != m_hasVideo || hasAudio != m_hasAudio;
++    m_duration = duration;
++    m_naturalSize = size;
++    m_hasVideo = hasVideo;
++    m_hasAudio = hasAudio;
++    m_buffered = duration > 0 ? PlatformTimeRanges(MediaTime::zeroTime(), MediaTime::createWithDouble(duration)) : PlatformTimeRanges();
++    m_loadingProgressed = true;
++    // libVLC tells the video size before the duration: loadedmetadata waits for
++    // the duration, or for the input to be open (live streams have none).
++    if (m_readyState < MediaPlayer::ReadyState::HaveMetadata && duration > 0)
++        setReadyState(MediaPlayer::ReadyState::HaveMetadata);
++    if (durationChanged)
++        player->durationChanged();
++    if (sizeChanged)
++        player->sizeChanged();
++    if (characteristicsChanged) {
++        player->characteristicChanged();
++        player->renderingModeChanged();
++    }
++}
++
++void MediaPlayerPrivateWebPorn::timeChanged(double seconds)
++{
++    if (m_seeking || m_ended)
++        return;
++    m_awaitingTimeAfterSeek = false;
++    m_time = seconds;
++    m_timeUpdated = MonotonicTime::now();
++}
++
++void MediaPlayerPrivateWebPorn::bufferingChanged(float)
++{
++    m_loadingProgressed = true;
++}
++
++void MediaPlayerPrivateWebPorn::firstFrame()
++{
++    if (RefPtr player = m_player.get())
++        player->firstVideoFrameAvailable();
++}
++
++// MARK: - Factory
++
++static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters& parameters)
++{
++    if (parameters.isMediaSource || parameters.isMediaStream || !mediaLibrary())
++        return MediaPlayer::SupportsType::IsNotSupported;
++    StringBuilder codecs;
++    for (auto& codec : parameters.type.codecs()) {
++        if (!codecs.isEmpty())
++            codecs.append(',');
++        codecs.append(codec);
++    }
++    switch (mediaLibrary()->supports(parameters.type.containerType().convertToASCIILowercase().utf8().data(), codecs.toString().utf8().data())) {
++    case WPMEDIA_SUPPORTED:
++        return MediaPlayer::SupportsType::IsSupported;
++    case WPMEDIA_MAYBE_SUPPORTED:
++        return MediaPlayer::SupportsType::MayBeSupported;
++    case WPMEDIA_NOT_SUPPORTED:
++        break;
++    }
++    return MediaPlayer::SupportsType::IsNotSupported;
++}
++
++class MediaPlayerFactoryWebPorn final : public MediaPlayerFactory {
++    WTF_MAKE_TZONE_ALLOCATED(MediaPlayerFactoryWebPorn);
++    WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(MediaPlayerFactoryWebPorn);
++private:
++    MediaPlayerEnums::MediaEngineIdentifier identifier() const final { return MediaPlayerEnums::MediaEngineIdentifier::HolePunch; }
++
++    Ref<MediaPlayerPrivateInterface> createMediaEnginePlayer(MediaPlayer& player) const final
++    {
++        return adoptRef(*new MediaPlayerPrivateWebPorn(player));
++    }
++
++    void getSupportedTypes(HashSet<String>& types) const final
++    {
++        static constexpr ASCIILiteral mimeTypes[] = { "video/mp4"_s, "video/x-m4v"_s, "video/quicktime"_s, "video/webm"_s,
++            "audio/webm"_s, "video/ogg"_s, "audio/ogg"_s, "audio/mpeg"_s, "audio/mp4"_s, "audio/x-m4a"_s, "audio/aac"_s,
++            "audio/wav"_s, "audio/flac"_s, "application/vnd.apple.mpegurl"_s, "application/x-mpegurl"_s };
++        for (auto type : mimeTypes)
++            types.add(type);
++    }
++
++    MediaPlayer::SupportsType supportsTypeAndCodecs(const MediaEngineSupportParameters& parameters) const final
++    {
++        return supportsType(parameters);
++    }
++};
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaPlayerFactoryWebPorn);
++
++void registerWebPornMediaEngine(MediaEngineRegistrar registrar)
++{
++    if (mediaLibrary())
++        registrar(makeUnique<MediaPlayerFactoryWebPorn>());
++}
++
++} // namespace WebCore
++
++#endif // defined(WK26_IOS_TARGET)
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+new file mode 100644
+index 0000000000..effd780713
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -0,0 +1,81 @@
++// wpmedia: the C ABI between WebCore's MediaPlayerPrivateWebPorn and
++// libWebPornMedia.dylib (libVLC). WebCore dlopens the library, so no C++ crosses
++// the boundary and the LGPL code stays in its own image. A copy of this header
++// lives in Source/WebCore/platform/graphics/webporn/; keep them identical.
++//
++// Threading: every function may be called from any thread. Client callbacks
++// arrive on libVLC's event thread (or the main thread) and must not call back
++// into the player synchronously.
++
++#ifndef WPMEDIA_H
++#define WPMEDIA_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define WPMEDIA_ABI_VERSION 1
++
++typedef struct wpmedia_player wpmedia_player;
++
++typedef enum {
++    WPMEDIA_STATE_IDLE,
++    WPMEDIA_STATE_OPENING,
++    WPMEDIA_STATE_BUFFERING,
++    WPMEDIA_STATE_PLAYING,
++    WPMEDIA_STATE_PAUSED,
++    WPMEDIA_STATE_ENDED,
++    WPMEDIA_STATE_ERROR,
++} wpmedia_state;
++
++typedef enum {
++    WPMEDIA_NOT_SUPPORTED,
++    WPMEDIA_MAYBE_SUPPORTED,
++    WPMEDIA_SUPPORTED,
++} wpmedia_support;
++
++typedef struct {
++    void* context;
++    void (*state_changed)(void* context, wpmedia_state);
++    // Metadata is known: duration (seconds, 0 when live / unknown), video size
++    // (0 x 0 for audio only), whether there are video / audio tracks.
++    void (*metadata_changed)(void* context, double duration, unsigned width, unsigned height, int has_video, int has_audio);
++    // Current time moved (playback or a finished seek).
++    void (*time_changed)(void* context, double seconds);
++    // Network cache fill, 0-100.
++    void (*buffering)(void* context, float percent);
++    // A first video frame is on screen.
++    void (*first_frame)(void* context);
++} wpmedia_client;
++
++int wpmedia_abi_version(void);
++
++// container: MIME type without parameters ("video/mp4"); codecs: the codecs
++// parameter or NULL / "".
++wpmedia_support wpmedia_supports(const char* container, const char* codecs);
++
++// The client is copied; its callbacks run until wpmedia_destroy returns.
++wpmedia_player* wpmedia_create(const wpmedia_client*);
++void wpmedia_destroy(wpmedia_player*);
++
++// A CALayer (owned by the player) that shows the video scaled to fit, and
++// follows its own bounds. Valid until wpmedia_destroy.
++void* wpmedia_layer(wpmedia_player*);
++
++// Opens the URL paused: metadata arrives without playing. mime_type (the
++// element's or the response's, without parameters), user_agent and referrer may
++// be NULL.
++void wpmedia_open(wpmedia_player*, const char* url, const char* mime_type, const char* user_agent, const char* referrer);
++void wpmedia_play(wpmedia_player*);
++void wpmedia_pause(wpmedia_player*);
++void wpmedia_seek(wpmedia_player*, double seconds);
++double wpmedia_time(wpmedia_player*);
++void wpmedia_set_rate(wpmedia_player*, float rate);
++void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
++void wpmedia_set_muted(wpmedia_player*, int muted);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

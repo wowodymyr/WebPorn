@@ -1,0 +1,372 @@
+From d104e7e76d6f67abef2f0d7086b1fbae1b94d1b4 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 21:03:34 +0200
+Subject: [PATCH 10/24] WebPorn media: bytes from WebCore's loader (range
+ requests) into libWebPornMedia's stream input
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 219 ++++++++++++++++++
+ .../platform/graphics/webporn/wpmedia.h       |  21 +-
+ 2 files changed, 239 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index ac7ce5806c..1c5821912d 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -5,6 +5,12 @@
+  * pauses at the start) and draws the video itself into a CALayer, which is this
+  * engine's platform layer. Its callbacks come from libVLC's threads; a bridge
+  * object takes them to the main thread and drops them once the player is gone.
++ *
++ * Media bytes come from WebCore's loader (cookies, credentials, CORS, blob: and
++ * data: URLs, the page's referrer and user agent) and are handed to libVLC as a
++ * stream; libVLC asks for byte offsets when it seeks and the loader fetches them
++ * with HTTP range requests. HLS (libVLC loads the playlist's segments itself) and
++ * file: URLs still go to libVLC by URL.
+  */
+ 
+ #import "config.h"
+@@ -17,7 +23,13 @@
+ #import "NativeImage.h"
+ #import "Logging.h"
+ #import "MediaPlayerPrivate.h"
++#import "ParsedContentRange.h"
++#import "PlatformMediaResourceLoader.h"
+ #import "PlatformTimeRanges.h"
++#import "ResourceError.h"
++#import "ResourceRequest.h"
++#import "ResourceResponse.h"
++#import "SharedBuffer.h"
+ #import "wpmedia.h"
+ #import <QuartzCore/QuartzCore.h>
+ #import <dlfcn.h>
+@@ -48,6 +60,9 @@ struct WebPornMediaLibrary {
+     void (*setMuted)(wpmedia_player*, int);
+     void* (*copyFrame)(wpmedia_player*, unsigned);
+     void (*requestFrame)(wpmedia_player*, unsigned);
++    void (*openStream)(wpmedia_player*, const char*, const char*, unsigned long long, int);
++    int (*streamData)(wpmedia_player*, unsigned, const void*, unsigned long);
++    void (*streamEnd)(wpmedia_player*, unsigned, int);
+ };
+ 
+ static const WebPornMediaLibrary* mediaLibrary()
+@@ -81,6 +96,9 @@ static const WebPornMediaLibrary* mediaLibrary()
+         WP_RESOLVE(setMuted, "wpmedia_set_muted");
+         WP_RESOLVE(copyFrame, "wpmedia_copy_frame");
+         WP_RESOLVE(requestFrame, "wpmedia_request_frame");
++        WP_RESOLVE(openStream, "wpmedia_open_stream");
++        WP_RESOLVE(streamData, "wpmedia_stream_data");
++        WP_RESOLVE(streamEnd, "wpmedia_stream_end");
+ #undef WP_RESOLVE
+         library = &functions;
+     });
+@@ -97,6 +115,7 @@ public:
+ 
+     // Main thread only, like the player.
+     void detach() { m_player = nullptr; }
++    MediaPlayerPrivateWebPorn* player() const { return m_player; }
+ 
+     template<typename Function> void post(Function&& function)
+     {
+@@ -115,6 +134,32 @@ private:
+     MediaPlayerPrivateWebPorn* m_player;
+ };
+ 
++// One load of the media stream (one generation): the bytes from an offset on.
++class WebPornMediaStreamClient final : public PlatformMediaResourceClient {
++public:
++    static Ref<WebPornMediaStreamClient> create(WebPornMediaBridge& bridge, unsigned generation, uint64_t offset) { return adoptRef(*new WebPornMediaStreamClient(bridge, generation, offset)); }
++
++private:
++    WebPornMediaStreamClient(WebPornMediaBridge& bridge, unsigned generation, uint64_t offset)
++        : m_bridge(bridge)
++        , m_generation(generation)
++        , m_offset(offset)
++    {
++    }
++
++    void responseReceived(PlatformMediaResource&, const ResourceResponse&, CompletionHandler<void(ShouldContinuePolicyCheck)>&&) final;
++    void dataReceived(PlatformMediaResource&, const SharedBuffer&) final;
++    void accessControlCheckFailed(PlatformMediaResource&, const ResourceError&) final;
++    void loadFailed(PlatformMediaResource&, const ResourceError&) final;
++    void loadFinished(PlatformMediaResource&, const NetworkLoadMetrics&) final;
++
++    Ref<WebPornMediaBridge> m_bridge;
++    unsigned m_generation;
++    uint64_t m_offset;
++    uint64_t m_skip { 0 }; // a 200 answer to a range request starts at byte 0
++    bool m_stopped { false };
++};
++
+ class MediaPlayerPrivateWebPorn final : public MediaPlayerPrivateInterface, public RefCounted<MediaPlayerPrivateWebPorn> {
+     WTF_MAKE_TZONE_ALLOCATED(MediaPlayerPrivateWebPorn);
+ public:
+@@ -182,7 +227,16 @@ public:
+     void firstFrame();
+     void frameReady(RetainPtr<CGImageRef>&&);
+ 
++    // The stream, from WebPornMediaStreamClient and libWebPornMedia.
++    void startStreamLoad(unsigned generation, uint64_t offset);
++    void streamResponse(unsigned generation, const ResourceResponse&);
++    bool streamData(unsigned generation, std::span<const uint8_t>);
++    void streamEnd(unsigned generation, bool failed);
++
+ private:
++    bool shouldStream(const URL&) const;
++    void stopStreamLoad();
++
+     void setNetworkState(MediaPlayer::NetworkState);
+     void setReadyState(MediaPlayer::ReadyState);
+ 
+@@ -210,6 +264,10 @@ private:
+     MonotonicTime m_frameTime;
+     bool m_frameRequested { false };
+     mutable bool m_loadingProgressed { false };
++    String m_url;
++    RefPtr<PlatformMediaResource> m_resource;
++    unsigned m_streamGeneration { 0 };
++    bool m_streamOpened { false };
+ };
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaPlayerPrivateWebPorn);
+@@ -246,6 +304,9 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+     client.first_frame = [](void* context) {
+         bridgeFrom(context).post([](auto& player) { player.firstFrame(); });
+     };
++    client.stream_request = [](void* context, unsigned generation, unsigned long long offset) {
++        bridgeFrom(context).post([generation, offset](auto& player) { player.startStreamLoad(generation, offset); });
++    };
+     m_media = m_library.create(&client);
+     if (!m_media)
+         m_bridge->deref(); // no library player, no release call
+@@ -255,6 +316,7 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+ 
+ MediaPlayerPrivateWebPorn::~MediaPlayerPrivateWebPorn()
+ {
++    stopStreamLoad();
+     m_bridge->detach();
+     // No callback runs after destroy returns; queued ones find the bridge detached.
+     if (m_media)
+@@ -270,11 +332,17 @@ void MediaPlayerPrivateWebPorn::load(const String& url)
+     }
+     setNetworkState(MediaPlayer::NetworkState::Loading);
+     setReadyState(MediaPlayer::ReadyState::HaveNothing);
++    m_url = url;
++    if (shouldStream(URL { url })) {
++        startStreamLoad(0, 0);
++        return;
++    }
+     m_library.open(m_media, url.utf8().data(), player->contentMIMEType().utf8().data(), player->userAgent().utf8().data(), player->referrer().utf8().data());
+ }
+ 
+ void MediaPlayerPrivateWebPorn::cancelLoad()
+ {
++    stopStreamLoad();
+     if (m_media)
+         m_library.pause(m_media);
+ }
+@@ -391,6 +459,157 @@ void MediaPlayerPrivateWebPorn::setReadyState(MediaPlayer::ReadyState state)
+         player->readyStateChanged();
+ }
+ 
++// MARK: - Stream
++
++bool MediaPlayerPrivateWebPorn::shouldStream(const URL& url) const
++{
++    // /var/webporn/media-direct: everything by URL, as before the stream input.
++    static bool direct = !access("/var/webporn/media-direct", F_OK);
++    if (direct || !(url.protocolIsInHTTPFamily() || url.protocolIsBlob() || url.protocolIsData()))
++        return false;
++    RefPtr player = m_player.get();
++    String type = player ? player->contentMIMEType().convertToASCIILowercase() : String();
++    if (type.contains("mpegurl"_s) || url.path().convertToASCIILowercase().endsWith(".m3u8"_s))
++        return false;
++    return true;
++}
++
++void MediaPlayerPrivateWebPorn::stopStreamLoad()
++{
++    if (RefPtr resource = std::exchange(m_resource, nullptr)) {
++        resource->setClient(nullptr);
++        resource->shutdown();
++    }
++}
++
++void MediaPlayerPrivateWebPorn::startStreamLoad(unsigned generation, uint64_t offset)
++{
++    RefPtr player = m_player.get();
++    if (!player || (generation && !m_streamOpened))
++        return;
++    stopStreamLoad();
++    m_streamGeneration = generation;
++    ResourceRequest request { URL { m_url } };
++    request.setHTTPHeaderField(HTTPHeaderName::Range, makeString("bytes="_s, offset, '-'));
++    // The cache would keep whole videos; libVLC keeps its own window.
++    m_resource = player->mediaResourceLoader()->requestResource(WTF::move(request), PlatformMediaResourceLoader::LoadOption::DisallowCaching);
++    if (!m_resource) {
++        streamEnd(generation, true);
++        return;
++    }
++    m_resource->setClient(WebPornMediaStreamClient::create(m_bridge, generation, offset));
++}
++
++void MediaPlayerPrivateWebPorn::streamResponse(unsigned generation, const ResourceResponse& response)
++{
++    if (generation || m_streamOpened)
++        return;
++    RefPtr player = m_player.get();
++    if (!player)
++        return;
++    uint64_t size = 0;
++    bool seekable = false;
++    if (response.httpStatusCode() == 206) {
++        ParsedContentRange range { response.httpHeaderField(HTTPHeaderName::ContentRange) };
++        if (range.isValid() && range.instanceLength() != ParsedContentRange::unknownLength) {
++            size = range.instanceLength();
++            seekable = true;
++        }
++    } else if (response.expectedContentLength() > 0) {
++        size = response.expectedContentLength();
++        // blob: answers ranges too; a server that ignored this one may not.
++        seekable = response.url().protocolIsBlob() || equalLettersIgnoringASCIICase(response.httpHeaderField(HTTPHeaderName::AcceptRanges), "bytes"_s);
++    }
++    String type = player->contentMIMEType();
++    if (type.isEmpty())
++        type = response.mimeType();
++    m_streamOpened = true;
++    m_library.openStream(m_media, m_url.utf8().data(), type.utf8().data(), size, seekable);
++}
++
++bool MediaPlayerPrivateWebPorn::streamData(unsigned generation, std::span<const uint8_t> bytes)
++{
++    if (generation != m_streamGeneration || !m_streamOpened)
++        return false;
++    m_loadingProgressed = true;
++    return m_library.streamData(m_media, generation, bytes.data(), bytes.size());
++}
++
++void MediaPlayerPrivateWebPorn::streamEnd(unsigned generation, bool failed)
++{
++    if (generation != m_streamGeneration)
++        return;
++    m_resource = nullptr;
++    if (!m_streamOpened) {
++        setNetworkState(MediaPlayer::NetworkState::NetworkError);
++        return;
++    }
++    m_library.streamEnd(m_media, generation, failed);
++}
++
++void WebPornMediaStreamClient::responseReceived(PlatformMediaResource&, const ResourceResponse& response, CompletionHandler<void(ShouldContinuePolicyCheck)>&& completionHandler)
++{
++    int status = response.httpStatusCode();
++    if (status >= 400) {
++        m_stopped = true;
++        completionHandler(ShouldContinuePolicyCheck::No);
++        if (auto* player = m_bridge->player())
++            player->streamEnd(m_generation, true);
++        return;
++    }
++    if (status != 206)
++        m_skip = m_offset;
++    if (auto* player = m_bridge->player())
++        player->streamResponse(m_generation, response);
++    completionHandler(ShouldContinuePolicyCheck::Yes);
++}
++
++void WebPornMediaStreamClient::dataReceived(PlatformMediaResource& resource, const SharedBuffer& buffer)
++{
++    if (m_stopped)
++        return;
++    auto bytes = buffer.span();
++    if (m_skip) {
++        size_t skipped = std::min<uint64_t>(m_skip, bytes.size());
++        m_skip -= skipped;
++        bytes = bytes.subspan(skipped);
++        if (bytes.empty())
++            return;
++    }
++    auto* player = m_bridge->player();
++    if (player && player->streamData(m_generation, bytes))
++        return;
++    // Buffer full or a newer load: libWebPornMedia asks again when it needs more.
++    m_stopped = true;
++    resource.setClient(nullptr);
++    resource.shutdown();
++}
++
++void WebPornMediaStreamClient::accessControlCheckFailed(PlatformMediaResource&, const ResourceError&)
++{
++    m_stopped = true;
++    if (auto* player = m_bridge->player())
++        player->streamEnd(m_generation, true);
++}
++
++void WebPornMediaStreamClient::loadFailed(PlatformMediaResource&, const ResourceError& error)
++{
++    if (m_stopped || error.isCancellation())
++        return;
++    m_stopped = true;
++    if (auto* player = m_bridge->player())
++        player->streamEnd(m_generation, true);
++}
++
++void WebPornMediaStreamClient::loadFinished(PlatformMediaResource&, const NetworkLoadMetrics&)
++{
++    if (m_stopped)
++        return;
++    m_stopped = true;
++    if (auto* player = m_bridge->player())
++        player->streamEnd(m_generation, false);
++}
++
+ // MARK: - Callbacks
+ 
+ void MediaPlayerPrivateWebPorn::stateChanged(wpmedia_state state)
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+index 0bbcae7b36..c111797fb1 100644
+--- a/Source/WebCore/platform/graphics/webporn/wpmedia.h
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -14,7 +14,7 @@
+ extern "C" {
+ #endif
+ 
+-#define WPMEDIA_ABI_VERSION 2
++#define WPMEDIA_ABI_VERSION 3
+ 
+ typedef struct wpmedia_player wpmedia_player;
+ 
+@@ -49,6 +49,10 @@ typedef struct {
+     // Answer to wpmedia_request_frame: a CGImageRef (+1, the client releases it)
+     // or NULL.
+     void (*frame_ready)(void* context, void* image);
++    // Stream input (wpmedia_open_stream): load from this byte offset on with this
++    // generation, dropping any load in progress. Called from libVLC's threads,
++    // never after wpmedia_destroy has returned.
++    void (*stream_request)(void* context, unsigned generation, unsigned long long offset);
+     // Last call for this client, after every other callback, once the player is
+     // torn down (some time after wpmedia_destroy): release the context here.
+     void (*release)(void* context);
+@@ -73,6 +77,21 @@ void* wpmedia_layer(wpmedia_player*);
+ // element's or the response's, without parameters), user_agent and referrer may
+ // be NULL.
+ void wpmedia_open(wpmedia_player*, const char* url, const char* mime_type, const char* user_agent, const char* referrer);
++
++// Opens a byte stream the client delivers (WebCore's loader, MSE) instead of a
++// URL: libVLC reads what arrives through wpmedia_stream_data. The client has
++// already started loading from offset 0 with generation 0. size: total bytes,
++// 0 when unknown. seekable: the client can load from any offset (HTTP ranges);
++// otherwise the library never asks for anything but the next byte.
++// url only names the stream (logs, the demuxer's guess from an extension).
++void wpmedia_open_stream(wpmedia_player*, const char* url, const char* mime_type, unsigned long long size, int seekable);
++// Bytes of the load with this generation, in order. Returns 0 when the client
++// should stop that load (the buffer is full or the load is stale); the library
++// asks again through stream_request when it needs more.
++int wpmedia_stream_data(wpmedia_player*, unsigned generation, const void* bytes, unsigned long length);
++// The load with this generation is over: at the end of the stream, or failed.
++void wpmedia_stream_end(wpmedia_player*, unsigned generation, int failed);
++
+ void wpmedia_play(wpmedia_player*);
+ void wpmedia_pause(wpmedia_player*);
+ void wpmedia_seek(wpmedia_player*, double seconds);

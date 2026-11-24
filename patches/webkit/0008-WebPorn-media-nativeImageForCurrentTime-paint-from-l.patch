@@ -1,0 +1,196 @@
+From c53d413cbb06955276c2cba7411ce0615317d8a4 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 20:25:35 +0200
+Subject: [PATCH 08/24] WebPorn media: nativeImageForCurrentTime / paint from
+ libVLC snapshots
+
+First frame synchronously, then cached and refreshed in the background at
+most every 250 ms; the bridge lives until the library's release call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 64 ++++++++++++++++++-
+ .../platform/graphics/webporn/wpmedia.h       | 18 +++++-
+ 2 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index ae3e95f932..ac7ce5806c 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -13,6 +13,8 @@
+ #if defined(WK26_IOS_TARGET)
+ 
+ #import "DestinationColorSpace.h"
++#import "GraphicsContext.h"
++#import "NativeImage.h"
+ #import "Logging.h"
+ #import "MediaPlayerPrivate.h"
+ #import "PlatformTimeRanges.h"
+@@ -44,6 +46,8 @@ struct WebPornMediaLibrary {
+     void (*setRate)(wpmedia_player*, float);
+     void (*setVolume)(wpmedia_player*, float);
+     void (*setMuted)(wpmedia_player*, int);
++    void* (*copyFrame)(wpmedia_player*, unsigned);
++    void (*requestFrame)(wpmedia_player*, unsigned);
+ };
+ 
+ static const WebPornMediaLibrary* mediaLibrary()
+@@ -75,6 +79,8 @@ static const WebPornMediaLibrary* mediaLibrary()
+         WP_RESOLVE(setRate, "wpmedia_set_rate");
+         WP_RESOLVE(setVolume, "wpmedia_set_volume");
+         WP_RESOLVE(setMuted, "wpmedia_set_muted");
++        WP_RESOLVE(copyFrame, "wpmedia_copy_frame");
++        WP_RESOLVE(requestFrame, "wpmedia_request_frame");
+ #undef WP_RESOLVE
+         library = &functions;
+     });
+@@ -161,7 +167,11 @@ public:
+     const PlatformTimeRanges& buffered() const final { return m_buffered; }
+     bool didLoadingProgress() const final;
+ 
+-    void paint(GraphicsContext&, const FloatRect&) final { }
++    // Frames for canvas drawImage(), createImageBitmap(), WebGL uploads and
++    // non-composited painting: libVLC's snapshot (a GPU readback, ~250 ms), kept
++    // and refreshed in the background at most four times a second.
++    RefPtr<NativeImage> nativeImageForCurrentTime() final;
++    void paint(GraphicsContext&, const FloatRect&) final;
+     DestinationColorSpace colorSpace() final { return DestinationColorSpace::SRGB(); }
+ 
+     // From libWebPornMedia, on the main thread.
+@@ -170,6 +180,7 @@ public:
+     void timeChanged(double);
+     void bufferingChanged(float);
+     void firstFrame();
++    void frameReady(RetainPtr<CGImageRef>&&);
+ 
+ private:
+     void setNetworkState(MediaPlayer::NetworkState);
+@@ -195,6 +206,9 @@ private:
+     bool m_hasVideo { false };
+     bool m_hasAudio { false };
+     bool m_hasFirstFrame { false };
++    RetainPtr<CGImageRef> m_frame;
++    MonotonicTime m_frameTime;
++    bool m_frameRequested { false };
+     mutable bool m_loadingProgressed { false };
+ };
+ 
+@@ -208,7 +222,15 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+     , m_bridge(WebPornMediaBridge::create(*this))
+ {
+     wpmedia_client client { };
+-    client.context = &m_bridge.get();
++    // The library may call back after destroy, up to client.release.
++    client.context = &m_bridge.copyRef().leakRef();
++    client.release = [](void* context) {
++        static_cast<WebPornMediaBridge*>(context)->deref();
++    };
++    client.frame_ready = [](void* context, void* image) {
++        auto frame = adoptCF(static_cast<CGImageRef>(image));
++        bridgeFrom(context).post([frame = WTF::move(frame)](auto& player) mutable { player.frameReady(WTF::move(frame)); });
++    };
+     client.state_changed = [](void* context, wpmedia_state state) {
+         bridgeFrom(context).post([state](auto& player) { player.stateChanged(state); });
+     };
+@@ -225,6 +247,8 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+         bridgeFrom(context).post([](auto& player) { player.firstFrame(); });
+     };
+     m_media = m_library.create(&client);
++    if (!m_media)
++        m_bridge->deref(); // no library player, no release call
+     if (m_media)
+         m_layer = (__bridge CALayer *)m_library.layer(m_media);
+ }
+@@ -443,6 +467,42 @@ void MediaPlayerPrivateWebPorn::bufferingChanged(float)
+     m_loadingProgressed = true;
+ }
+ 
++static constexpr unsigned maximumFrameWidth = 1280;
++
++RefPtr<NativeImage> MediaPlayerPrivateWebPorn::nativeImageForCurrentTime()
++{
++    // By readiness, not first_frame: loadeddata comes before libVLC's
++    // video-output event does.
++    if (!m_media || !m_hasVideo || m_readyState < MediaPlayer::ReadyState::HaveCurrentData)
++        return nullptr;
++    if (!m_frame) {
++        // The first one synchronously, so that a one-off capture (a thumbnail
++        // drawn at loadeddata) is not blank.
++        m_frame = adoptCF(static_cast<CGImageRef>(m_library.copyFrame(m_media, maximumFrameWidth)));
++        m_frameTime = MonotonicTime::now();
++    } else if (!m_frameRequested && MonotonicTime::now() - m_frameTime > 250_ms) {
++        m_frameRequested = true;
++        m_library.requestFrame(m_media, maximumFrameWidth);
++    }
++    return m_frame ? NativeImage::create(RetainPtr { m_frame }) : nullptr;
++}
++
++void MediaPlayerPrivateWebPorn::paint(GraphicsContext& context, const FloatRect& rect)
++{
++    if (context.paintingDisabled())
++        return;
++    if (RefPtr image = nativeImageForCurrentTime())
++        context.drawNativeImage(*image, rect, FloatRect { { }, image->size() });
++}
++
++void MediaPlayerPrivateWebPorn::frameReady(RetainPtr<CGImageRef>&& frame)
++{
++    m_frameRequested = false;
++    m_frameTime = MonotonicTime::now();
++    if (frame)
++        m_frame = WTF::move(frame);
++}
++
+ void MediaPlayerPrivateWebPorn::firstFrame()
+ {
+     m_hasFirstFrame = true;
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+index effd780713..0bbcae7b36 100644
+--- a/Source/WebCore/platform/graphics/webporn/wpmedia.h
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -14,7 +14,7 @@
+ extern "C" {
+ #endif
+ 
+-#define WPMEDIA_ABI_VERSION 1
++#define WPMEDIA_ABI_VERSION 2
+ 
+ typedef struct wpmedia_player wpmedia_player;
+ 
+@@ -46,6 +46,12 @@ typedef struct {
+     void (*buffering)(void* context, float percent);
+     // A first video frame is on screen.
+     void (*first_frame)(void* context);
++    // Answer to wpmedia_request_frame: a CGImageRef (+1, the client releases it)
++    // or NULL.
++    void (*frame_ready)(void* context, void* image);
++    // Last call for this client, after every other callback, once the player is
++    // torn down (some time after wpmedia_destroy): release the context here.
++    void (*release)(void* context);
+ } wpmedia_client;
+ 
+ int wpmedia_abi_version(void);
+@@ -54,7 +60,8 @@ int wpmedia_abi_version(void);
+ // parameter or NULL / "".
+ wpmedia_support wpmedia_supports(const char* container, const char* codecs);
+ 
+-// The client is copied; its callbacks run until wpmedia_destroy returns.
++// The client is copied. Callbacks may still arrive after wpmedia_destroy returns,
++// up to client.release.
+ wpmedia_player* wpmedia_create(const wpmedia_client*);
+ void wpmedia_destroy(wpmedia_player*);
+ 
+@@ -74,6 +81,13 @@ void wpmedia_set_rate(wpmedia_player*, float rate);
+ void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
+ void wpmedia_set_muted(wpmedia_player*, int muted);
+ 
++// The current video frame as a CGImageRef (+1, the caller releases it), at most
++// max_width pixels wide, or NULL. Blocks for a few hundred milliseconds
++// (libVLC's snapshot: the frame is read back from the GPU); cache it.
++void* wpmedia_copy_frame(wpmedia_player*, unsigned max_width);
++// The same, without blocking: the frame arrives through frame_ready.
++void wpmedia_request_frame(wpmedia_player*, unsigned max_width);
++
+ #ifdef __cplusplus
+ }
+ #endif

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Logs of the swap tweaks (swap.log, safari.log) go here, written as mobile.
+mkdir -p /var/mobile/Media/webporn
+chown mobile:mobile /var/mobile/Media/webporn
+exit 0

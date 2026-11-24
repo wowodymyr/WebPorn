@@ -8,8 +8,8 @@
 //   4. redirect dlsym() lookups into the old engine (UIKit soft-links some entry points)
 //   5. attach foreign categories of old-engine classes to the new classes
 // Loaded into every UIKit app; it only acts in the apps switched on in
-// Settings > WebPorn (AppList page, tweak/prefs/WebPorn.plist), and loads TLSFix
-// (/var/webporn/lib/tlsfix.dylib) there first.
+// Settings > WebPorn (AppList page, tweak/prefs/WebPorn.plist). Modern TLS comes
+// from the TLSFix package (com.skyglow.tlsfix), a Substrate tweak of its own.
 // With /var/webporn/swap-dryrun present nothing is changed; the log only says
 // what would be rebound and what does not resolve. Log: /var/mobile/Media/webporn/swap.log
 
@@ -754,8 +754,6 @@ __attribute__((constructor)) static void webPornSwap(void)
         dryRun = !access("/var/webporn/swap-dryrun", F_OK);
         logf_("WebPornSwap in %s (pid %d)%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String], getpid(), dryRun ? " DRY RUN" : "");
         realDlsym = dlsym;
-        if (!dlopen("/var/webporn/lib/tlsfix.dylib", RTLD_NOW))
-            logf_("TLSFix: %s\n", dlerror());
 
         for (int i = 0; i < EngineImageCount; i++)
             oldHandles[i] = dlopen(oldPaths[i], RTLD_NOLOAD | RTLD_LAZY);

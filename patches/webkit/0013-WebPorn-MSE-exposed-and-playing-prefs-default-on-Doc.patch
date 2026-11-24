@@ -1,0 +1,122 @@
+From 2ce1b6af7ef140129727e6dc6754c58d9fdae3a6 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:20:12 +0200
+Subject: [PATCH 13/24] WebPorn: MSE exposed and playing (prefs default on,
+ DocumentLoader keeps the preference, no Cocoa WebM sources)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/loader/DocumentLoader.cpp                   | 7 ++++++-
+ .../platform/graphics/cocoa/AudioTrackPrivateWebM.cpp      | 2 +-
+ .../WebCore/platform/graphics/cocoa/SourceBufferParser.cpp | 6 ++++++
+ .../platform/graphics/cocoa/SourceBufferParserWebM.cpp     | 2 +-
+ .../platform/graphics/cocoa/VideoTrackPrivateWebM.cpp      | 2 +-
+ .../mac/WebView/WebPreferencesDefaultValues.mm             | 4 ++++
+ 6 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
+index a4b3b0e62d..5c7202dc1b 100644
+--- a/Source/WebCore/loader/DocumentLoader.cpp
++++ b/Source/WebCore/loader/DocumentLoader.cpp
+@@ -1477,7 +1477,12 @@ void DocumentLoader::applyPoliciesToSettings()
+     if (!m_frame->isMainFrame())
+         return;
+ 
+-#if ENABLE(MEDIA_SOURCE)
++#if ENABLE(MEDIA_SOURCE) && defined(WK26_IOS_TARGET)
++    // WebPorn: the default policy keeps the WebPreferences value (on: libVLC MSE)
++    // instead of the platform default, which is off on iOS.
++    if (m_mediaSourcePolicy != MediaSourcePolicy::Default)
++        m_frame->settings().setMediaSourceEnabled(m_mediaSourcePolicy == MediaSourcePolicy::Enable);
++#elif ENABLE(MEDIA_SOURCE)
+     m_frame->settings().setMediaSourceEnabled(m_mediaSourcePolicy == MediaSourcePolicy::Default ? Settings::platformDefaultMediaSourceEnabled() : m_mediaSourcePolicy == MediaSourcePolicy::Enable);
+ #endif
+ #if ENABLE(WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY)
+diff --git a/Source/WebCore/platform/graphics/cocoa/AudioTrackPrivateWebM.cpp b/Source/WebCore/platform/graphics/cocoa/AudioTrackPrivateWebM.cpp
+index 923433981a..8b6ca37f79 100644
+--- a/Source/WebCore/platform/graphics/cocoa/AudioTrackPrivateWebM.cpp
++++ b/Source/WebCore/platform/graphics/cocoa/AudioTrackPrivateWebM.cpp
+@@ -27,7 +27,7 @@
+ #include "AudioTrackPrivateWebM.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
+-#if ENABLE(MEDIA_SOURCE)
++#if ENABLE(MEDIA_SOURCE) && HAVE(WEBM_SOURCE_BUFFER_PARSER) // WebPorn: no libwebm on WK26
+ 
+ #include "TrackInfo.h"
+ 
+diff --git a/Source/WebCore/platform/graphics/cocoa/SourceBufferParser.cpp b/Source/WebCore/platform/graphics/cocoa/SourceBufferParser.cpp
+index 7474817ace..5d9b54be3f 100644
+--- a/Source/WebCore/platform/graphics/cocoa/SourceBufferParser.cpp
++++ b/Source/WebCore/platform/graphics/cocoa/SourceBufferParser.cpp
+@@ -32,7 +32,9 @@
+ #include "MediaSourceConfiguration.h"
+ #include "SharedBuffer.h"
+ #include "SourceBufferParserAVFObjC.h"
++#if HAVE(WEBM_SOURCE_BUFFER_PARSER)
+ #include "SourceBufferParserWebM.h"
++#endif
+ #include <pal/spi/cocoa/MediaToolboxSPI.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -43,15 +45,19 @@ namespace WebCore {
+ MediaPlayerEnums::SupportsType SourceBufferParser::isContentTypeSupported(const ContentType& type)
+ {
+     MediaPlayerEnums::SupportsType supports = MediaPlayerEnums::SupportsType::IsNotSupported;
++#if HAVE(WEBM_SOURCE_BUFFER_PARSER)
+     supports = std::max(supports, SourceBufferParserWebM::isContentTypeSupported(type));
++#endif
+     supports = std::max(supports, SourceBufferParserAVFObjC::isContentTypeSupported(type));
+     return supports;
+ }
+ 
+ RefPtr<SourceBufferParser> SourceBufferParser::create(const ContentType& type, const MediaSourceConfiguration& configuration)
+ {
++#if HAVE(WEBM_SOURCE_BUFFER_PARSER)
+     if (SourceBufferParserWebM::isContentTypeSupported(type) != MediaPlayerEnums::SupportsType::IsNotSupported)
+         return SourceBufferParserWebM::create();
++#endif
+ 
+     if (SourceBufferParserAVFObjC::isContentTypeSupported(type) != MediaPlayerEnums::SupportsType::IsNotSupported)
+         return adoptRef(new SourceBufferParserAVFObjC(configuration));
+diff --git a/Source/WebCore/platform/graphics/cocoa/SourceBufferParserWebM.cpp b/Source/WebCore/platform/graphics/cocoa/SourceBufferParserWebM.cpp
+index 0482327986..8e7f189347 100644
+--- a/Source/WebCore/platform/graphics/cocoa/SourceBufferParserWebM.cpp
++++ b/Source/WebCore/platform/graphics/cocoa/SourceBufferParserWebM.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "SourceBufferParserWebM.h"
+ 
+-#if ENABLE(MEDIA_SOURCE)
++#if ENABLE(MEDIA_SOURCE) && HAVE(WEBM_SOURCE_BUFFER_PARSER) // WebPorn: no libwebm on WK26
+ 
+ #if ENABLE(AV1)
+ #include "AV1Utilities.h"
+diff --git a/Source/WebCore/platform/graphics/cocoa/VideoTrackPrivateWebM.cpp b/Source/WebCore/platform/graphics/cocoa/VideoTrackPrivateWebM.cpp
+index a1685ca574..e59712b9f0 100644
+--- a/Source/WebCore/platform/graphics/cocoa/VideoTrackPrivateWebM.cpp
++++ b/Source/WebCore/platform/graphics/cocoa/VideoTrackPrivateWebM.cpp
+@@ -27,7 +27,7 @@
+ #include "VideoTrackPrivateWebM.h"
+ #include <wtf/TZoneMallocInlines.h>
+ 
+-#if ENABLE(MEDIA_SOURCE)
++#if ENABLE(MEDIA_SOURCE) && HAVE(WEBM_SOURCE_BUFFER_PARSER) // WebPorn: no libwebm on WK26
+ 
+ #include "MediaSample.h"
+ #include "TrackInfo.h"
+diff --git a/Source/WebKitLegacy/mac/WebView/WebPreferencesDefaultValues.mm b/Source/WebKitLegacy/mac/WebView/WebPreferencesDefaultValues.mm
+index e806ba0b99..b41bb4aaa3 100644
+--- a/Source/WebKitLegacy/mac/WebView/WebPreferencesDefaultValues.mm
++++ b/Source/WebKitLegacy/mac/WebView/WebPreferencesDefaultValues.mm
+@@ -214,6 +214,10 @@ bool defaultWheelEventGesturesBecomeNonBlocking()
+ 
+ bool defaultMediaSourceEnabled()
+ {
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: MSE (libVLC) on iPhones too; YouTube and others need it.
++    return true;
++#endif
+     return !PAL::deviceClassIsSmallScreen();
+ }
+ 

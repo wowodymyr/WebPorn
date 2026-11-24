@@ -5,7 +5,8 @@ set -euo pipefail
 WP=$(cd "$(dirname "$0")/../.." && pwd)
 HOST=${1:-iphone}
 T=$HOME/theos/toolchain/linux/iphone/bin
-VLC=$WP/prebuilt/armv7-ios8/vlc/MobileVLCKit.framework
+# MobileVLCKit from the libvlc repo (github.com/wowodymyr/libvlc, ./prepare-vlc.sh armv7 armv7-ios8)
+VLC=${VLC:-$WP/../libvlc/build/armv7-ios8/MobileVLCKit.framework}
 B=$WP/build/vlcview/VLCView.app
 rm -rf "$B"; mkdir -p "$B"
 clang -target armv7-apple-ios8.4 -isysroot "$WP/sdks/iPhoneOS9.3.sdk" -O1 -fobjc-arc -I"$VLC/Headers" \

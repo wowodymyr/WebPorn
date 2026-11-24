@@ -1,0 +1,40 @@
+From 4698c5a0fde9c02bc98ee6dd9a288479336e73cf Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 20:02:31 +0200
+Subject: [PATCH 07/24] WebPorn: no scrolling coordinator in WK1 iOS -> guard
+ LayerAncestorClippingStack
+
+YouTube's watch page crashed in updateWithClipData (overflow scroll marked
+async, coordinator null).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/rendering/LayerAncestorClippingStack.cpp | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/Source/WebCore/rendering/LayerAncestorClippingStack.cpp b/Source/WebCore/rendering/LayerAncestorClippingStack.cpp
+index 71e54db53b..9f86c613f2 100644
+--- a/Source/WebCore/rendering/LayerAncestorClippingStack.cpp
++++ b/Source/WebCore/rendering/LayerAncestorClippingStack.cpp
+@@ -139,8 +139,9 @@ bool LayerAncestorClippingStack::updateWithClipData(ScrollingCoordinator* scroll
+         if (existingEntry.clipData != clipDataEntry)
+             stackChanged = true;
+ 
+-        if (existingEntry.clipData.isOverflowScroll && !clipDataEntry.isOverflowScroll) {
+-            ASSERT(scrollingCoordinator);
++        // WebPorn: WebKit1 on iOS has no scrolling coordinator (and so no proxy nodes)
++        // although overflow scrolling is marked async (YouTube crashed here).
++        if (existingEntry.clipData.isOverflowScroll && !clipDataEntry.isOverflowScroll && scrollingCoordinator) {
+             scrollingCoordinator->unparentChildrenAndDestroyNode(existingEntry.overflowScrollProxyNodeID);
+             existingEntry.overflowScrollProxyNodeID = std::nullopt;
+         }
+@@ -151,8 +152,7 @@ bool LayerAncestorClippingStack::updateWithClipData(ScrollingCoordinator* scroll
+     if (stackEntryCount > clipEntryCount) {
+         for (int i = clipEntryCount; i < stackEntryCount; ++i) {
+             auto& entry = m_stack[i];
+-            if (entry.overflowScrollProxyNodeID) {
+-                ASSERT(scrollingCoordinator);
++            if (entry.overflowScrollProxyNodeID && scrollingCoordinator) {
+                 scrollingCoordinator->unparentChildrenAndDestroyNode(entry.overflowScrollProxyNodeID);
+             }
+             GraphicsLayer::unparentAndClear(entry.clippingLayer);

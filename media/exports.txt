@@ -1,2 +1,0 @@
-_wpmedia_*
-_wpmedia_debug_vlc_player

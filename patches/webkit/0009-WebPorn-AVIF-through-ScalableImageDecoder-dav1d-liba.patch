@@ -1,0 +1,153 @@
+From 38b56a4c96b390bb9d3543cb34512cdad4e95317 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 20:54:59 +0200
+Subject: [PATCH 09/24] WebPorn: AVIF through ScalableImageDecoder /
+ dav1d+libavif on WK26_IOS_TARGET
+
+Decoded by ftyp brand, not advertised (Accept, MIME registry): AV1 on
+the A6 is much slower than the JPEG/WebP fallbacks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/PlatformIOS.cmake              |  3 +++
+ .../loader/cache/CachedResourceRequest.cpp    |  4 ++-
+ Source/WebCore/platform/MIMETypeRegistry.cpp  |  4 ++-
+ .../image-decoders/ScalableImageDecoder.cpp   | 26 +++++++++++++++++--
+ .../image-decoders/avif/AVIFImageReader.cpp   |  4 +++
+ Source/cmake/OptionsMac.cmake                 |  2 ++
+ 6 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/Source/WebCore/PlatformIOS.cmake b/Source/WebCore/PlatformIOS.cmake
+index ee13e8cd41..02e563fa66 100644
+--- a/Source/WebCore/PlatformIOS.cmake
++++ b/Source/WebCore/PlatformIOS.cmake
+@@ -64,6 +64,8 @@ endforeach ()
+ # WebPorn: iOS 8's ImageIO has no WebP; ScalableImageDecoder uses WebCore's own
+ # decoder over a decode-only libwebp (toolchain/build-libwebp.sh).
+ list(APPEND WebCore_LIBRARIES "${WEBPORN_WEBP_DIR}/lib/libwpwebp.a")
++# Same for AVIF: dav1d + decode-only libavif (toolchain/build-avif.sh).
++list(APPEND WebCore_LIBRARIES "${WEBPORN_AVIF_DIR}/lib/libwpavif.a")
+ 
+ list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+     "${WEBCORE_DIR}/platform/graphics/cocoa/controls"
+@@ -146,6 +148,7 @@ list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+ list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES
+     "${CMAKE_OSX_SYSROOT}/usr/include/libxml2"
+     "${WEBPORN_WEBP_DIR}/include"
++    "${WEBPORN_AVIF_DIR}/include"
+ )
+ 
+ list(APPEND WebCore_SOURCES
+diff --git a/Source/WebCore/loader/cache/CachedResourceRequest.cpp b/Source/WebCore/loader/cache/CachedResourceRequest.cpp
+index 18560b7f1c..30cad44f2d 100644
+--- a/Source/WebCore/loader/cache/CachedResourceRequest.cpp
++++ b/Source/WebCore/loader/cache/CachedResourceRequest.cpp
+@@ -151,7 +151,9 @@ static String acceptHeaderValueForImageResource(bool usingSecureProtocol)
+     static MainThreadNeverDestroyed<String> staticPrefix = [] {
+         StringBuilder builder;
+         builder.append("image/webp,"_s);
+-#if (HAVE(AVIF) && WK26_IOS_HAS_AVIF) || USE(AVIF)
++// WebPorn: USE(AVIF) decodes AVIF by signature on iOS 8-10 but does not ask for it;
++// AV1 on these CPUs is much slower than the JPEG/WebP fallbacks.
++#if (HAVE(AVIF) && WK26_IOS_HAS_AVIF) || (USE(AVIF) && !defined(WK26_IOS_TARGET))
+         builder.append("image/avif,"_s);
+ #endif
+ #if (HAVE(JPEGXL) && WK26_IOS_HAS_JPEGXL) || USE(JPEGXL)
+diff --git a/Source/WebCore/platform/MIMETypeRegistry.cpp b/Source/WebCore/platform/MIMETypeRegistry.cpp
+index d01ec75fa0..4470a6e3f7 100644
+--- a/Source/WebCore/platform/MIMETypeRegistry.cpp
++++ b/Source/WebCore/platform/MIMETypeRegistry.cpp
+@@ -101,7 +101,9 @@ constexpr SortedArraySet supportedImageMIMETypeSet { std::to_array<ComparableCas
+ #define WK26_IOS_HAS_JPEGXL (!PLATFORM(IOS_FAMILY) || __IPHONE_OS_VERSION_MIN_REQUIRED >= 170000)
+ #define WK26_IOS_HAS_HEIC   (!PLATFORM(IOS_FAMILY) || __IPHONE_OS_VERSION_MIN_REQUIRED >= 110000)
+ 
+-#if (HAVE(AVIF) && WK26_IOS_HAS_AVIF) || USE(AVIF)
++// WebPorn: USE(AVIF) decodes AVIF by signature on iOS 8-10 but does not ask for it;
++// AV1 on these CPUs is much slower than the JPEG/WebP fallbacks.
++#if (HAVE(AVIF) && WK26_IOS_HAS_AVIF) || (USE(AVIF) && !defined(WK26_IOS_TARGET))
+     "image/avif"_s,
+ #endif
+     "image/bmp"_s,
+diff --git a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp b/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
+index 42fcf3bf29..1c05447546 100644
+--- a/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
++++ b/Source/WebCore/platform/image-decoders/ScalableImageDecoder.cpp
+@@ -38,7 +38,9 @@
+ // WebPorn: ImageIO decodes WebP only from iOS 14 on.
+ #include "webp/WEBPImageDecoder.h"
+ #endif
+-#if USE(AVIF)
++#if USE(AVIF) && defined(WK26_IOS_TARGET)
++#include "avif/AVIFImageDecoder.h"
++#elif USE(AVIF)
+ #include "AVIFImageDecoder.h"
+ #endif
+ #if USE(JPEGXL)
+@@ -107,7 +109,20 @@ static bool matchesWebPSignature(std::span<const uint8_t> contents)
+ #if USE(AVIF)
+ static bool matchesAVIFSignature(std::span<const uint8_t> contents, FragmentedSharedBuffer& data)
+ {
+-#if USE(CG)
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: ImageIO on iOS 8-10 does not know AVIF; look for the brand in the ftyp box
++    // (major brand or one of the first compatible brands) so MP4/HEIC are not taken.
++    UNUSED_PARAM(data);
++    if (contents.size() < 16 || !spanHasPrefix(contents.subspan(4), "ftyp"_span))
++        return false;
++    size_t boxSize = std::min<size_t>(contents.size(), (size_t(contents[0]) << 24) | (contents[1] << 16) | (contents[2] << 8) | contents[3]);
++    for (size_t offset = 8; offset + 4 <= boxSize; offset += offset == 8 ? 8 : 4) {
++        auto brand = contents.subspan(offset);
++        if (spanHasPrefix(brand, "avif"_span) || spanHasPrefix(brand, "avis"_span))
++            return true;
++    }
++    return false;
++#elif USE(CG)
+     UNUSED_PARAM(contents);
+     auto sharedBuffer = data.makeContiguous();
+     auto cfData = sharedBuffer->createCFData();
+@@ -141,10 +156,17 @@ RefPtr<ScalableImageDecoder> ScalableImageDecoder::create(FragmentedSharedBuffer
+     if (data.size() < lengthOfLongestSignature)
+         return nullptr;
+ 
++#if defined(WK26_IOS_TARGET) && USE(AVIF)
++    // WebPorn: AVIF brands are in the ftyp box, past the 14 bytes above.
++    std::array<uint8_t, 32> contents;
++    std::span contentsSpan = std::span { contents }.first(std::min<size_t>(data.size(), contents.size()));
++    data.copyTo(contentsSpan);
++#else
+     std::array<uint8_t, lengthOfLongestSignature> contents;
+     data.copyTo(std::span { contents });
+ 
+     std::span contentsSpan { contents };
++#endif
+ 
+ #if !PLATFORM(COCOA)
+     if (matchesGIFSignature(contentsSpan))
+diff --git a/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp b/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp
+index 3c414d2485..4777bfeee5 100644
+--- a/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp
++++ b/Source/WebCore/platform/image-decoders/avif/AVIFImageReader.cpp
+@@ -45,6 +45,10 @@ AVIFImageReader::AVIFImageReader(RefPtr<AVIFImageDecoder>&& decoder)
+     // AV1 image items. (This issue has been corrected in libheif v1.12.0.).
+     // See the definition of AVIF_STRICT_PIXI_REQUIRED in avif.h.
+     m_avifDecoder->strictFlags &= ~AVIF_STRICT_PIXI_REQUIRED;
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: dav1d on the A6/A7 dual cores; libavif defaults to one thread.
++    m_avifDecoder->maxThreads = 2;
++#endif
+ }
+ 
+ AVIFImageReader::~AVIFImageReader() = default;
+diff --git a/Source/cmake/OptionsMac.cmake b/Source/cmake/OptionsMac.cmake
+index a741598d79..41695b5148 100644
+--- a/Source/cmake/OptionsMac.cmake
++++ b/Source/cmake/OptionsMac.cmake
+@@ -85,6 +85,8 @@ if (WK_IOS_TARGET)
+         WEBKIT_OPTION_DEFAULT_PORT_VALUE(${_wp_feature} PRIVATE OFF)
+     endforeach ()
+     WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_LCMS PRIVATE OFF)
++    # ImageIO has AVIF only from iOS 16: WebCore's own decoder over dav1d/libavif.
++    WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_AVIF PRIVATE ON)
+     # On in PlatformEnableCocoa.h for iOS, but the CMake defaults would override it.
+     # TOUCH_EVENTS without IOS_TOUCH_EVENTS (Apple-internal sources), as Web Port does.
+     foreach (_wp_feature

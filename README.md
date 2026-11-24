@@ -1,7 +1,58 @@
 # WebPorn
 
-Modern WebKit (Safari 26, tag `WebKit-7624.5.1.10.3`) for jailbroken iOS 8–10,
-swapped in at runtime the way Web Port does it on iOS 6 (see `ref/`).
+Modern WebKit (Safari 26, tag `WebKit-7624.5.1.10.3`) for jailbroken iOS 8 on 32-bit
+devices, swapped in at runtime the way Web Port does it on iOS 6 (see `ref/`).
+MobileSafari and any UIKit app you switch on get today's JavaScriptCore (JIT + DFG),
+WebCore and WebKitLegacy instead of the iOS 8 engine: ES2023, modern CSS, WebP / AVIF,
+`<video>` with Media Source Extensions (YouTube) through libVLC.
+
+## Install
+
+Release: [WebPorn 1.0.0](https://github.com/wowodymyr/WebPorn/releases/tag/1.0.0).
+Install these three packages (Filza, `dpkg -i`, or your own repo), then respring:
+
+| Package | What | Where |
+|---|---|---|
+| `com.skyglow.tlsfix` | TLSFix: modern TLS for CFNetwork (by nfzerox, Requis) | [nfzerox/TLSFix releases](https://github.com/nfzerox/TLSFix/releases) |
+| `net.webporn.libvlc` | media engine: libVLC 3.0.18 + libWebPornMedia | [wowodymyr/libvlc releases](https://github.com/wowodymyr/libvlc/releases) |
+| `net.webporn` | the engine, the swap tweaks, Settings > WebPorn | [releases](https://github.com/wowodymyr/WebPorn/releases) |
+
+Also needed (from the usual repos): Cydia Substrate, PreferenceLoader, AppList.
+
+Then open **Settings > WebPorn** and switch on Safari and/or the apps that should get the
+new engine; it takes effect the next time the app starts. Nothing is switched on by default.
+
+- Tested on an iPhone 5 with iOS 8.4.1. Built for armv7 only: arm64 devices and iOS 9+
+  are not supported (the package says `firmware (<< 9.0)`).
+- MobileSafari runs in its WebKit1 mode (`UseLegacyWebKit`); this is what lets the new
+  engine replace the old one in-process.
+- The JIT needs the `dynamic-codesigning` entitlement (Safari has it). Other apps run the
+  engine in the LLInt interpreter: works, slower.
+- Logs: `/var/mobile/Media/webporn/` (`swap.log`, `safari.log`).
+- Files: engine in `/var/webporn/lib`, tweaks `WebPornSwap` (all UIKit apps, acts only where
+  switched on) and `WebPornSafari` (MobileSafari) in `/Library/MobileSubstrate/DynamicLibraries`,
+  settings in `/var/mobile/Library/Preferences/net.webporn.swap.plist`.
+
+## License
+
+Same as WebKit: the engine and everything in this repository are distributed under the
+GNU LGPL 2.1 (`COPYING.LIB`), with Apple's BSD-style license (`LICENSE-APPLE`) where a
+file says so. The WebKit sources are `WebKit-7624.5.1.10.3` + `ref/webport.diff` (Web Port)
++ `patches/webkit/*.patch` (this project; `git am` them on top). Bundled third-party code
+keeps its own license: ICU (Unicode license), libwebp, dav1d, libavif, WOFF2, brotli (BSD /
+MIT style), LLVM libc++ (Apache 2.0 with LLVM exception).
+
+## Building the package
+
+```sh
+# WebKit, ICU, libc++ etc. as described below, then:
+package/build-deb.sh            # -> build/net.webporn_<version>_iphoneos-arm.deb
+```
+
+The media engine is built from [wowodymyr/libvlc](https://github.com/wowodymyr/libvlc)
+(`wpmedia.h` there and `Source/WebCore/platform/graphics/webporn/wpmedia.h` must stay identical).
+
+# Development notes
 
 ## Targets
 
@@ -16,10 +67,11 @@ swapped in at runtime the way Web Port does it on iOS 6 (see `ref/`).
 - `src/webkit` — WebKit tag `WebKit-7624.5.1.10.3`, sparse (no LayoutTests/JSTests/PerformanceTests);
   branch `webport` = tag + Web Port diff, branch `webporn` = our work on top
 - `src/llvm-project` — LLVM 21.1.8 runtimes (libc++/libc++abi) for the static modern libc++
-- `src/tlsfix` — nfzerox/TLSFix (SecureTransport → OpenSSL 1.1.1); OpenSSL not vendored, build it
 - `sdks/` — iPhoneOS10.3.sdk and iPhoneOS9.3.sdk from theos/sdks (sparse clone in `sdks/theos-sdks`)
 - `toolchain/` — CMake toolchain files and wrappers
-- `prebuilt/` — per-arch libc++, ICU, WOFF2, OpenSSL, libvlc
+- `prebuilt/` — per-arch libc++, ICU, WOFF2, libwebp, AVIF
+- `patches/webkit/` — the `webporn` branch as patches on top of `webport`
+- `package/` — Debian package (`build-deb.sh`)
 - `tweak/` — engine-swap tweak, stubs library, Safari/UIKit compat
 - `docs/` — notes
 
@@ -131,13 +183,12 @@ toolchain/build-libcxx.sh armv7 8.0  iPhoneOS9.3  && toolchain/build-compat.sh a
 ## Running the engine on the device (armv7, iPhone 5 / iOS 8.4.1)
 
 Status 2026-11-23: a stock UIWebView app (`tests/wptest`) runs WebPorn after the
-in-process engine swap; modern sites (en.m.wikipedia.org) load over TLSFix.
+in-process engine swap; modern sites (en.m.wikipedia.org) load over TLSFix (package `com.skyglow.tlsfix`).
 Screenshots: `device/iphone5-8.4.1/results/`.
 
 ```sh
 device/deploy-webkit.sh armv7-ios8 iphone   # JSC + WebCore + WebKitLegacy -> /var/webporn/lib
 tweak/build.sh                             # WebPornSwap.dylib (Substrate, filter: net.webporn.wptest)
-tweak/build-tlsfix.sh                      # TLSFix + OpenSSL 1.1.1w (toolchain/build-openssl.sh), same filter
 tests/wptest/build.sh                      # WPTest.app; `uiopen wptest:` on the device
 device/last-crash.py WPTest                # newest crash report, WebPorn frames symbolized
 ```
@@ -204,8 +255,8 @@ Gotchas found on the way:
   Which apps get the engine: Settings > WebPorn (`tweak/prefs/WebPorn.plist`, an AppList
   page of switches, installed by `tweak/build.sh`) writes `Enabled-<bundle id>` to
   `/var/mobile/Library/Preferences/net.webporn.swap.plist`; WebPornSwap loads into every
-  UIKit app and acts only where switched on (WPTest defaults to on), dlopening TLSFix
-  (`/var/webporn/lib/tlsfix.dylib`, no longer a tweak of its own) first. WebPornSafari only
+  UIKit app and acts only where switched on (WPTest defaults to on). TLS is the TLSFix package's
+  business (a Substrate tweak in every CFNetwork process). WebPornSafari only
   acts when Safari is on. Not yet tried in an App Store app (container sandbox).
   `tests/safari/sites.sh`: 10/10 sites load and render (screens via VNC, `tests/vnc.sh`,
   Veency; vncdotool in `build/vncpkgs`).
@@ -220,8 +271,8 @@ Gotchas found on the way:
     main queue, taking the new engine's WebThreadLock first (Timer asserts otherwise).
   Tools: `tests/exclog` (ExcLog tweak: every ObjC throw + uncaught exceptions to
   `exc-<process>.log`), `toolchain/objc-symbolize.py`, `toolchain/objc-classes.py`.
-- Media engine (`<video>` / `<audio>` on libVLC): `media/wpmedia.h` is a C ABI;
-  `media/wpmedia.m` -> `/var/webporn/lib/libWebPornMedia.dylib` (`media/build.sh`) implements it
+- Media engine (`<video>` / `<audio>` on libVLC): `wpmedia.h` is a C ABI;
+  `wpmedia.m` -> `/var/webporn/lib/libWebPornMedia.dylib` (repo `libvlc`, `./build.sh`) implements it
   over MobileVLCKit's libvlc; WebCore's `platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm`
   dlopens it and registers (as the HolePunch engine identity, unused in this build) only when it
   loads. Video uses libVLC's own iOS output (VideoToolbox, OpenGL ES view) inside a CALayer that
@@ -297,15 +348,15 @@ Gotchas found on the way:
   WPTest: `capture-repeat.txt` (probe every N s into `results.txt`), `prefs.txt` (report
   WebPreferences values). Also fixed on the way: Safari died on an audio route change
   (`-[AVAudioSession routingContextUID]` is iOS 11; AirPlay target skipped on WK26).
-- libVLC: `toolchain/prepare-vlc.sh armv7 armv7-ios8` thins MobileVLCKit 3.5.1 (libvlc
+- libVLC: `prepare-vlc.sh armv7 armv7-ios8` (repo `libvlc`) thins MobileVLCKit 3.5.1 (libvlc
   3.0.18, last release for iOS 8.4; dylib, all newer imports weak) into
-  `prebuilt/armv7-ios8/vlc`, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.
+  `build/armv7-ios8` there, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.
   `tests/vlc-smoke.c` plays a URL into a vmem buffer and prints fps / libvlc stats.
   On the iPhone 5: VideoToolbox H.264 720p60, VP8/VP9 360p60 decode in real time, but the
   vmem path (CVPX copy + chroma conversion, swscale has no NEON bgra path) shows only
   ~16-27 fps, 720p->RV32 5 fps: frames must stay on the GPU (VLC's GLES2 vout).
   VLC's https goes through SecureTransport: fails on iOS 8 roots without TLSFix in the
-  process (`DYLD_INSERT_LIBRARIES=.../tlsfix.dylib` for the CLI).
+  process (`DYLD_INSERT_LIBRARIES=/Library/MobileSubstrate/DynamicLibraries/tlsfix.dylib` for the CLI).
 - Images iOS 8's ImageIO cannot decode go through WebCore's own ScalableImageDecoder:
   WebP over libwebp (`toolchain/build-libwebp.sh`, `WEBPORN_WEBP_DIR`) and AVIF over
   dav1d 1.4.3 + decode-only libavif 1.1.1 (`toolchain/build-avif.sh armv7 8.0 iPhoneOS9.3`,

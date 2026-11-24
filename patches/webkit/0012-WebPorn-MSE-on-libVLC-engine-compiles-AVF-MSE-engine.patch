@@ -1,0 +1,253 @@
+From d3275f45f2b89d029e6acc2725feed144b0a5e5d Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:02:22 +0200
+Subject: [PATCH 12/24] WebPorn: MSE on (libVLC engine compiles; AVF MSE engine
+ and WebM parser off on WK26_IOS_TARGET)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WTF/wtf/PlatformHave.h                 |   3 +-
+ .../objc/SourceBufferPrivateAVFObjC.mm        |   2 +
+ .../webporn/MediaPlayerPrivateWebPorn.mm      |   2 +
+ .../graphics/webporn/WebPornMediaSource.cpp   | 116 +++++++++---------
+ .../graphics/webporn/WebPornMediaSource.h     |   2 +
+ Source/cmake/OptionsMac.cmake                 |   2 +-
+ 6 files changed, 69 insertions(+), 58 deletions(-)
+
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 13af8a0307..c15d9f3e38 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -343,7 +343,8 @@
+ 
+ /* WK26: iOS 6 lacks AVStreamDataParser and the AVSampleBuffer renderers, and there
+    is no armv7 libwebm; MSE is served by a separate engine instead. */
+-#if PLATFORM(COCOA) && (!PLATFORM(IOS_FAMILY) || __IPHONE_OS_VERSION_MIN_REQUIRED >= 80000)
++/* WebPorn: the same holds on iOS 8-10 (MSE goes to libVLC, platform/graphics/webporn). */
++#if PLATFORM(COCOA) && (!PLATFORM(IOS_FAMILY) || __IPHONE_OS_VERSION_MIN_REQUIRED >= 80000) && !defined(WK26_IOS_TARGET)
+ #define HAVE_AVSTREAMDATAPARSER 1
+ #define HAVE_WEBM_SOURCE_BUFFER_PARSER 1
+ #else
+diff --git a/Source/WebCore/platform/graphics/avfoundation/objc/SourceBufferPrivateAVFObjC.mm b/Source/WebCore/platform/graphics/avfoundation/objc/SourceBufferPrivateAVFObjC.mm
+index 7b848242ef..d4cff5210f 100644
+--- a/Source/WebCore/platform/graphics/avfoundation/objc/SourceBufferPrivateAVFObjC.mm
++++ b/Source/WebCore/platform/graphics/avfoundation/objc/SourceBufferPrivateAVFObjC.mm
+@@ -791,8 +791,10 @@ void SourceBufferPrivateAVFObjC::configureParser(SourceBufferParser& parser)
+             protectedThis->didProvideContentKeyRequestInitializationDataForTrackID(WTF::move(initData), trackID);
+     });
+ 
++#if HAVE(WEBM_SOURCE_BUFFER_PARSER) // WebPorn
+     if (RefPtr webmParser = dynamicDowncast<SourceBufferParserWebM>(parser); webmParser && m_configuration.supportsLimitedMatroska)
+         webmParser->allowLimitedMatroska();
++#endif
+ 
+ #if !RELEASE_LOG_DISABLED
+     parser.setLogger(m_logger.get(), m_logIdentifier);
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index 6ac7ee4777..e9955d7247 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -35,6 +35,7 @@
+ #import "ResourceResponse.h"
+ #import "SharedBuffer.h"
+ #if ENABLE(MEDIA_SOURCE)
++#import "MediaPromiseTypes.h"
+ #import "MediaSourcePrivateClient.h"
+ #import "WebPornMediaSource.h"
+ #endif
+@@ -43,6 +44,7 @@
+ #import <dlfcn.h>
+ #import <wtf/MainThread.h>
+ #import <wtf/MonotonicTime.h>
++#import <wtf/NativePromise.h>
+ #import <wtf/NeverDestroyed.h>
+ #import <wtf/RetainPtr.h>
+ #import <wtf/TZoneMallocInlines.h>
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+index 8234d6a0f0..5a7db1c93a 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+@@ -12,6 +12,7 @@
+ #include "Logging.h"
+ #include "MediaDescription.h"
+ #include "MediaPlayer.h"
++#include "MediaPlayerPrivate.h"
+ #include "MediaSample.h"
+ #include "MediaSourcePrivateClient.h"
+ #include "SharedBuffer.h"
+@@ -77,6 +78,7 @@ private:
+     {
+     }
+ 
++public:
+     MediaTime presentationTime() const final { return m_presentationTime; }
+     MediaTime decodeTime() const final { return m_decodeTime; }
+     MediaTime duration() const final { return m_duration; }
+@@ -101,6 +103,7 @@ private:
+     PlatformSample platformSample() const final { return PlatformSample { static_cast<const MockSampleBox*>(nullptr) }; }
+     Type type() const final { return Type::None; }
+ 
++private:
+     TrackID m_trackID;
+     MediaTime m_presentationTime;
+     MediaTime m_decodeTime;
+@@ -508,62 +511,6 @@ Ref<MediaPromise> SourceBufferPrivateWebPorn::appendInternal(Ref<SharedBuffer>&&
+     return MediaPromise::createAndResolve();
+ }
+ 
+-bool SourceBufferPrivateWebPorn::parseInitialization(std::span<const uint8_t> moov)
+-{
+-    InitializationSegment segment;
+-    Vector<ParsedTrack> tracks;
+-    uint64_t duration = 0;
+-    uint32_t movieTimescale = 0;
+-    forEachBox(moov, [&](uint32_t type, std::span<const uint8_t> payload) {
+-        if (type == fourCC("mvhd")) {
+-            BoxReader reader(payload);
+-            uint8_t version = reader.u8();
+-            reader.skip(3 + (version ? 16 : 8));
+-            movieTimescale = reader.u32();
+-            duration = version ? reader.u64() : reader.u32();
+-        } else if (type == fourCC("trak")) {
+-            if (auto track = parseTrack(payload))
+-                tracks.append(WTF::move(*track));
+-        } else if (type == fourCC("mvex")) {
+-            forEachBox(payload, [&](uint32_t type, std::span<const uint8_t> payload) {
+-                if (type == fourCC("mehd")) {
+-                    BoxReader reader(payload);
+-                    uint8_t version = reader.u8();
+-                    reader.skip(3);
+-                    duration = version ? reader.u64() : reader.u32();
+-                } else if (type == fourCC("trex")) {
+-                    BoxReader reader(payload);
+-                    reader.skip(4);
+-                    TrackID trackID = reader.u32();
+-                    reader.skip(4); // default_sample_description_index
+-                    for (auto& track : tracks) {
+-                        if (track.trackID != trackID)
+-                            continue;
+-                        track.defaultDuration = reader.u32();
+-                        track.defaultSize = reader.u32();
+-                        track.defaultFlags = reader.u32();
+-                    }
+-                }
+-            });
+-        }
+-    });
+-    if (tracks.isEmpty())
+-        return false;
+-    segment.duration = duration && movieTimescale && duration != 0xffffffff && duration != UINT64_MAX ? MediaTime(duration, movieTimescale) : MediaTime::zeroTime();
+-    RefPtr mediaSource = mediaSourcePrivate();
+-    for (auto& track : tracks) {
+-        if (track.config->isVideo())
+-            segment.videoTracks.append({ WebPornMediaDescription::create(track.config.get()), WebPornVideoTrackPrivate::create(track.trackID) });
+-        else
+-            segment.audioTracks.append({ WebPornMediaDescription::create(track.config.get()), WebPornAudioTrackPrivate::create(track.trackID) });
+-        if (mediaSource)
+-            mediaSource->muxer().addTrack(*this, track.trackID, track.config.copyRef());
+-    }
+-    m_tracks = WTF::move(tracks);
+-    didReceiveInitializationSegment(WTF::move(segment));
+-    return true;
+-}
+-
+ bool SourceBufferPrivateWebPorn::parseFragment(std::span<const uint8_t> moof, uint64_t moofOffset, std::span<const uint8_t> mdat, uint64_t mdatOffset)
+ {
+     bool ok = true;
+@@ -663,6 +610,7 @@ public:
+ 
+ private:
+     struct Track {
++        WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(Track);
+         ThreadSafeWeakPtr<SourceBufferPrivateWebPorn> owner;
+         TrackID trackID { 0 };
+         unsigned number { 0 }; // Matroska track number
+@@ -695,6 +643,62 @@ private:
+     size_t m_clusterBlocks { 0 };
+ };
+ 
++bool SourceBufferPrivateWebPorn::parseInitialization(std::span<const uint8_t> moov)
++{
++    InitializationSegment segment;
++    Vector<ParsedTrack> tracks;
++    uint64_t duration = 0;
++    uint32_t movieTimescale = 0;
++    forEachBox(moov, [&](uint32_t type, std::span<const uint8_t> payload) {
++        if (type == fourCC("mvhd")) {
++            BoxReader reader(payload);
++            uint8_t version = reader.u8();
++            reader.skip(3 + (version ? 16 : 8));
++            movieTimescale = reader.u32();
++            duration = version ? reader.u64() : reader.u32();
++        } else if (type == fourCC("trak")) {
++            if (auto track = parseTrack(payload))
++                tracks.append(WTF::move(*track));
++        } else if (type == fourCC("mvex")) {
++            forEachBox(payload, [&](uint32_t type, std::span<const uint8_t> payload) {
++                if (type == fourCC("mehd")) {
++                    BoxReader reader(payload);
++                    uint8_t version = reader.u8();
++                    reader.skip(3);
++                    duration = version ? reader.u64() : reader.u32();
++                } else if (type == fourCC("trex")) {
++                    BoxReader reader(payload);
++                    reader.skip(4);
++                    TrackID trackID = reader.u32();
++                    reader.skip(4); // default_sample_description_index
++                    for (auto& track : tracks) {
++                        if (track.trackID != trackID)
++                            continue;
++                        track.defaultDuration = reader.u32();
++                        track.defaultSize = reader.u32();
++                        track.defaultFlags = reader.u32();
++                    }
++                }
++            });
++        }
++    });
++    if (tracks.isEmpty())
++        return false;
++    segment.duration = duration && movieTimescale && duration != 0xffffffff && duration != UINT64_MAX ? MediaTime(duration, movieTimescale) : MediaTime::zeroTime();
++    RefPtr mediaSource = mediaSourcePrivate();
++    for (auto& track : tracks) {
++        if (track.config->isVideo())
++            segment.videoTracks.append({ WebPornMediaDescription::create(track.config.get()), WebPornVideoTrackPrivate::create(track.trackID) });
++        else
++            segment.audioTracks.append({ WebPornMediaDescription::create(track.config.get()), WebPornAudioTrackPrivate::create(track.trackID) });
++        if (mediaSource)
++            mediaSource->muxer().addTrack(*this, track.trackID, track.config.copyRef());
++    }
++    m_tracks = WTF::move(tracks);
++    didReceiveInitializationSegment(WTF::move(segment));
++    return true;
++}
++
+ static constexpr size_t maximumQueuedSamples = 120;
+ 
+ static void appendEBMLID(Vector<uint8_t>& out, uint32_t id)
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
+index 780c8a5730..03fcf0e7b6 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
+@@ -30,6 +30,8 @@ struct MediaEngineSupportParameters;
+ class WebPornMediaSourceSink : public CanMakeWeakPtr<WebPornMediaSourceSink> {
+ public:
+     virtual ~WebPornMediaSourceSink() = default;
++    virtual void ref() const = 0;
++    virtual void deref() const = 0;
+     virtual MediaPlayerPrivateInterface& mediaSourcePlayer() = 0;
+     virtual const Logger& mediaSourceLogger() = 0;
+     // A new stream: the one before it (if any) is dropped.
+diff --git a/Source/cmake/OptionsMac.cmake b/Source/cmake/OptionsMac.cmake
+index 41695b5148..9dfd4e251d 100644
+--- a/Source/cmake/OptionsMac.cmake
++++ b/Source/cmake/OptionsMac.cmake
+@@ -75,7 +75,7 @@ if (WK_IOS_TARGET)
+             ENABLE_CONTENT_FILTERING ENABLE_CONTEXT_MENUS ENABLE_CURSOR_VISIBILITY
+             ENABLE_DRAG_SUPPORT ENABLE_ENCRYPTED_MEDIA ENABLE_GAMEPAD ENABLE_GPU_PROCESS
+             ENABLE_LEGACY_CUSTOM_PROTOCOL_MANAGER ENABLE_LEGACY_ENCRYPTED_MEDIA
+-            ENABLE_MEDIA_SOURCE ENABLE_MEDIA_STREAM ENABLE_MEMORY_SAMPLER
++            ENABLE_MEDIA_STREAM ENABLE_MEMORY_SAMPLER
+             ENABLE_MOUSE_CURSOR_SCALE ENABLE_PAYMENT_REQUEST ENABLE_PDFKIT_PLUGIN
+             ENABLE_PICTURE_IN_PICTURE_API ENABLE_POINTER_LOCK ENABLE_SANDBOX_EXTENSIONS
+             ENABLE_SERVICE_CONTROLS

@@ -1,0 +1,323 @@
+From f806387cdeb481ac016a01587ac27257d8f94d02 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 10:40:58 +0200
+Subject: [PATCH 20/24] WebPorn MSE: soft seeks (no restart for a short seek
+ ahead into written data: hls.js start/nudges), MSE debug logging; console
+ messages to a file (/var/webporn/console-log)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../webporn/MediaPlayerPrivateWebPorn.mm      |   1 +
+ .../graphics/webporn/WebPornMediaSource.cpp   | 104 +++++++++++++++++-
+ .../graphics/webporn/WebPornMediaSource.h     |   9 +-
+ .../mac/WebCoreSupport/WebChromeClient.mm     |  32 ++++++
+ 4 files changed, 139 insertions(+), 7 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index 4e8e3e467b..6426cdb65b 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -294,6 +294,7 @@ private:
+     void endMediaSourceStream() final;
+     void mediaSourceDurationChanged() final;
+     void mediaSourceActiveSourceBuffersChanged() final;
++    double mediaSourcePlayedTime() final { return m_media ? m_library.time(m_media) : 0; }
+ #endif
+ 
+     bool shouldStream(const URL&) const;
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+index defcf19e2d..39ea0d0132 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+@@ -483,10 +483,34 @@ private:
+     Vector<uint8_t> m_moof;
+     uint64_t m_moofOffset { 0 };
+     Vector<ParsedTrack> m_tracks;
++    FILE* m_dump { nullptr };
++    size_t m_dumped { 0 };
+ };
+ 
++// Debug: the first bytes appended to each source buffer, sourcebuffer-<n>.mp4.
++static void dumpAppend(FILE*& file, size_t& dumped, std::span<const uint8_t> bytes)
++{
++    static unsigned count;
++    if (!file && !dumped && !access("/var/webporn/wpmedia-debug", F_OK)) {
++        char path[128];
++        snprintf(path, sizeof(path), "/var/mobile/Media/webporn/sourcebuffer-%u.mp4", count++ % 4);
++        file = fopen(path, "w");
++    }
++    if (!file)
++        return;
++    size_t length = std::min(bytes.size(), size_t(4 << 20) - dumped);
++    fwrite(bytes.data(), 1, length, file);
++    fflush(file);
++    dumped += length;
++    if (dumped >= size_t(4 << 20)) {
++        fclose(file);
++        file = nullptr;
++    }
++}
++
+ Ref<MediaPromise> SourceBufferPrivateWebPorn::appendInternal(Ref<SharedBuffer>&& data)
+ {
++    dumpAppend(m_dump, m_dumped, data->span());
+     m_input.append(data->span());
+     size_t consumed = 0;
+     BoxReader reader(m_input.span());
+@@ -506,6 +530,7 @@ Ref<MediaPromise> SourceBufferPrivateWebPorn::appendInternal(Ref<SharedBuffer>&&
+                 size = (size << 8) | m_input[start + i];
+         }
+         if (size < 8) {
++            mseLog("append: bad box size %llu at %llu", (unsigned long long)size, (unsigned long long)(m_inputOffset + start));
+             m_input.clear();
+             return MediaPromise::createAndReject(PlatformMediaError::ParsingError);
+         }
+@@ -525,6 +550,8 @@ Ref<MediaPromise> SourceBufferPrivateWebPorn::appendInternal(Ref<SharedBuffer>&&
+                 ok = parseFragment(m_moof.span(), m_moofOffset, payload, offset + (size - payload.size()));
+             m_moof.clear();
+         }
++        if (type == fourCC("moov") || !ok)
++            mseLog("append: %c%c%c%c (%llu bytes) at %llu %s", char(type >> 24), char(type >> 16), char(type >> 8), char(type), (unsigned long long)size, (unsigned long long)offset, ok ? "ok" : "FAILED");
+         if (!ok) {
+             m_input.clear();
+             return MediaPromise::createAndReject(PlatformMediaError::ParsingError);
+@@ -631,7 +658,7 @@ public:
+     void trackEnded(SourceBufferPrivateWebPorn&, TrackID);
+     bool isReadyForMoreSamples(SourceBufferPrivateWebPorn&, TrackID);
+     void notifyWhenReady(SourceBufferPrivateWebPorn&, TrackID);
+-    void prepareSeek(const MediaTime&);
++    bool prepareSeek(const MediaTime&);
+     void resume();
+     void reset();
+ 
+@@ -647,6 +674,9 @@ private:
+         bool flushedInRestart { false };
+         bool wantsNotification { false };
+         unsigned logged { 0 };
++        std::optional<MediaTime> lastWritten; // decode time of the last block in this stream
++        std::optional<MediaTime> dropThrough; // after a soft seek: re-enqueued samples already written
++        bool softFlushPending { false };
+     };
+ 
+     Track* track(SourceBufferPrivateWebPorn&, TrackID);
+@@ -666,6 +696,8 @@ private:
+     bool m_ended { false };
+     bool m_pumping { false };
+     MediaTime m_target { MediaTime::zeroTime() };
++    std::optional<MediaTime> m_streamStart; // presentation time of the first block of this stream
++    MediaTime m_writtenThrough { MediaTime::zeroTime() }; // latest presentation time written
+     std::optional<MediaTime> m_prerollStart; // the first non-displaying video sample after a restart
+     Vector<uint8_t> m_cluster;
+     int64_t m_clusterTime { 0 };
+@@ -846,10 +878,30 @@ void WebPornMatroskaMuxer::beginRestart()
+     });
+ }
+ 
+-void WebPornMatroskaMuxer::prepareSeek(const MediaTime& target)
++bool WebPornMatroskaMuxer::prepareSeek(const MediaTime& target)
+ {
++    // A seek a little ahead of where playback is, into what the stream already
++    // holds (hls.js seeks to where its buffer starts, and nudges the playhead by
++    // tenths of a second): restarting would cost a second or more (more than
++    // two before the first frame, when the video output is still being set up),
++    // long enough for players to see a stall and seek again.
++    if (m_streamStarted && !m_restarting && m_streamStart) {
++        double played = std::max(m_mediaSource.playedTime(), m_streamStart->toDouble());
++        double ahead = target.toDouble() - played;
++        if (ahead >= -0.05 && ahead <= 1.5 && target <= m_writtenThrough + MediaTime::createWithDouble(0.5)) {
++            mseLog("soft seek to %.3f (played %.3f, written through %.3f)", target.toDouble(), played, m_writtenThrough.toDouble());
++            // Each track's flush for this seek (it comes later, from the source
++            // buffer's own queue) keeps the stream going.
++            for (auto& track : m_tracks)
++                track->softFlushPending = true;
++            return false;
++        }
++    }
++    for (auto& track : m_tracks)
++        track->softFlushPending = false;
+     m_target = target;
+     beginRestart();
++    return true;
+ }
+ 
+ void WebPornMatroskaMuxer::flush(SourceBufferPrivateWebPorn& owner, TrackID trackID)
+@@ -857,6 +909,15 @@ void WebPornMatroskaMuxer::flush(SourceBufferPrivateWebPorn& owner, TrackID trac
+     auto* track = this->track(owner, trackID);
+     if (!track)
+         return;
++    if (track->softFlushPending) {
++        track->softFlushPending = false;
++        // The source buffer re-enqueues from the key frame before the target:
++        // what the stream already has is dropped, the rest continues it.
++        track->queue.clear();
++        track->ended = false;
++        track->dropThrough = track->lastWritten;
++        return;
++    }
+     mseLog("flush track %u%s", track->number, m_restarting ? "" : " (no seek)");
+     if (!m_restarting) {
+         // A flush without a seek (reenqueueMediaIfNeeded after a removal): start
+@@ -878,9 +939,14 @@ void WebPornMatroskaMuxer::enqueue(SourceBufferPrivateWebPorn& owner, TrackID tr
+     // old position: drop that until it is re-enqueued from the target.
+     if (m_restarting && !track->flushedInRestart)
+         return;
++    if (track->dropThrough) {
++        if (sample->decodeTime() <= *track->dropThrough)
++            return;
++        track->dropThrough = std::nullopt;
++    }
+     track->ended = false;
+     m_ended = false;
+-    if (track->queue.isEmpty() || !(track->logged++ % 200))
++    if (!(track->logged++ % 500))
+         mseLog("enqueue track %u dts %.3f pts %.3f%s (queued %zu)", track->number, sample->decodeTime().toDouble(), sample->presentationTime().toDouble(), (sample->flags() & MediaSample::IsNonDisplaying) ? " non-displaying" : "", track->queue.size());
+     track->queue.append(WTF::move(sample));
+     pump();
+@@ -940,6 +1006,12 @@ void WebPornMatroskaMuxer::notifyReadyTracks()
+ void WebPornMatroskaMuxer::startStream()
+ {
+     mseLog("start stream, %zu tracks, target %.3f", m_tracks.size(), m_target.toDouble());
++    m_streamStart = std::nullopt;
++    m_writtenThrough = MediaTime::zeroTime();
++    for (auto& track : m_tracks) {
++        track->lastWritten = std::nullopt;
++        track->dropThrough = std::nullopt;
++    }
+     m_mediaSource.startSinkStream();
+     m_streamStarted = true;
+     m_restarting = false;
+@@ -1037,6 +1109,12 @@ static bool isNonReferencePicture(const WebPornMediaSample& sample)
+ void WebPornMatroskaMuxer::writeBlock(Track& track, WebPornMediaSample& sample)
+ {
+     auto presentationTime = sample.presentationTime();
++    track.lastWritten = sample.decodeTime();
++    if (!(sample.flags() & MediaSample::IsNonDisplaying)) {
++        if (!m_streamStart)
++            m_streamStart = presentationTime;
++        m_writtenThrough = std::max(m_writtenThrough, presentationTime);
++    }
+     if (sample.flags() & MediaSample::IsNonDisplaying) {
+         // Decode, do not show: Matroska has no such flag that libVLC honors, so
+         // these frames (from the key frame to the seek target) are squeezed into
+@@ -1195,6 +1273,7 @@ void SourceBufferPrivateWebPorn::notifyClientWhenReadyForMoreSamples(TrackID tra
+ Ref<MediaSourcePrivateWebPorn> MediaSourcePrivateWebPorn::create(WebPornMediaSourceSink& sink, MediaSourcePrivateClient& client)
+ {
+     Ref mediaSource = adoptRef(*new MediaSourcePrivateWebPorn(sink, client));
++    mseLog("media source opened");
+     client.setPrivateAndOpen(mediaSource.copyRef());
+     return mediaSource;
+ }
+@@ -1209,7 +1288,16 @@ MediaSourcePrivateWebPorn::MediaSourcePrivateWebPorn(WebPornMediaSourceSink& sin
+ 
+ MediaSourcePrivateWebPorn::~MediaSourcePrivateWebPorn() = default;
+ 
++static bool supportsTypeInternal(const MediaEngineSupportParameters&, bool& codecsKnown);
++
+ bool MediaSourcePrivateWebPorn::supportsType(const MediaEngineSupportParameters& parameters, bool& codecsKnown)
++{
++    bool supported = supportsTypeInternal(parameters, codecsKnown);
++    mseLog("isTypeSupported %s: %s", parameters.type.raw().utf8().data(), supported ? "yes" : "no");
++    return supported;
++}
++
++static bool supportsTypeInternal(const MediaEngineSupportParameters& parameters, bool& codecsKnown)
+ {
+     codecsKnown = false;
+     auto container = parameters.type.containerType().convertToASCIILowercase();
+@@ -1262,9 +1350,14 @@ void MediaSourcePrivateWebPorn::setSink(WebPornMediaSourceSink* sink)
+     m_sink = sink;
+ }
+ 
+-void MediaSourcePrivateWebPorn::prepareSeek(const MediaTime& target)
++bool MediaSourcePrivateWebPorn::prepareSeek(const MediaTime& target)
++{
++    return m_muxer->prepareSeek(target);
++}
++
++double MediaSourcePrivateWebPorn::playedTime() const
+ {
+-    m_muxer->prepareSeek(target);
++    return m_sink ? m_sink->mediaSourcePlayedTime() : 0;
+ }
+ 
+ void MediaSourcePrivateWebPorn::resumeStream()
+@@ -1295,6 +1388,7 @@ MediaSourcePrivate::AddStatus MediaSourcePrivateWebPorn::addSourceBuffer(const C
+     parameters.isMediaSource = true;
+     parameters.type = type;
+     bool codecsKnown;
++    mseLog("addSourceBuffer %s", type.raw().utf8().data());
+     if (!supportsType(parameters, codecsKnown))
+         return AddStatus::NotSupported;
+     {
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
+index 03fcf0e7b6..300a4ceafa 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.h
+@@ -41,6 +41,8 @@ public:
+     virtual void endMediaSourceStream() = 0;
+     virtual void mediaSourceDurationChanged() = 0;
+     virtual void mediaSourceActiveSourceBuffersChanged() = 0;
++    // Where the library's playback is (seconds; 0 before the first frame).
++    virtual double mediaSourcePlayedTime() = 0;
+ };
+ 
+ class MediaSourcePrivateWebPorn final : public MediaSourcePrivate {
+@@ -57,8 +59,11 @@ public:
+     void setPlayer(MediaPlayerPrivateInterface*) final;
+     void setSink(WebPornMediaSourceSink*);
+ 
+-    // Before seekToTime(): the next samples start a new stream at this time.
+-    void prepareSeek(const MediaTime&);
++    // Before seekToTime(): the next samples start a new stream at this time, or
++    // (a short way ahead of playback, in what the stream already has) the stream
++    // goes on: libVLC gets there by itself. Returns whether the stream restarts.
++    bool prepareSeek(const MediaTime&);
++    double playedTime() const;
+     // The player's buffer has room again.
+     void resumeStream();
+ 
+diff --git a/Source/WebKitLegacy/mac/WebCoreSupport/WebChromeClient.mm b/Source/WebKitLegacy/mac/WebCoreSupport/WebChromeClient.mm
+index 3b87ca798e..0bf819d2ed 100644
+--- a/Source/WebKitLegacy/mac/WebCoreSupport/WebChromeClient.mm
++++ b/Source/WebKitLegacy/mac/WebCoreSupport/WebChromeClient.mm
+@@ -463,8 +463,40 @@ inline static NSString *stringForMessageLevel(MessageLevel level)
+     return @"";
+ }
+ 
++#if defined(WK26_IOS_TARGET)
++#include <mutex>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++// WebPorn: with /var/webporn/console-log present, every console message and
++// uncaught exception goes to /var/mobile/Media/webporn/console-<process>.log
++// (UIWebView and Safari show them nowhere).
++static void logConsoleMessage(MessageLevel level, const String& message, unsigned lineNumber, const String& sourceURL)
++{
++    static FILE* file;
++    static std::once_flag once;
++    std::call_once(once, [] {
++        if (access("/var/webporn/console-log", F_OK))
++            return;
++        char path[256];
++        snprintf(path, sizeof(path), "/var/mobile/Media/webporn/console-%s.log", getprogname());
++        file = fopen(path, "w");
++    });
++    if (!file)
++        return;
++    static constexpr const char* levels[] = { "log", "warning", "error", "debug", "info" };
++    unsigned index = static_cast<unsigned>(level);
++    fprintf(file, "[%s] %s (%s:%u)\n", index < std::size(levels) ? levels[index] : "?", message.utf8().data(), sourceURL.utf8().data(), lineNumber);
++    fflush(file);
++}
++#endif
++
+ void WebChromeClient::addMessageToConsole(MessageSource source, MessageLevel level, const String& message, unsigned lineNumber, unsigned columnNumber, const String& sourceURL)
+ {
++#if defined(WK26_IOS_TARGET)
++    logConsoleMessage(level, message, lineNumber, sourceURL);
++#endif
+ #if !PLATFORM(IOS_FAMILY)
+     id delegate = [m_webView UIDelegate];
+ #else

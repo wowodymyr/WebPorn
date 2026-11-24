@@ -1,0 +1,248 @@
+From 1dc9481acb276bdb1a68643a02e7c0b47c2b93ee Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 11:34:44 +0200
+Subject: [PATCH 22/24] WebPorn media: HLS through libWebPornMedia's proxy,
+ loaded by the page's loader (ABI 5)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 130 ++++++++++++++++++
+ .../platform/graphics/webporn/wpmedia.h       |  18 ++-
+ 2 files changed, 147 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index 6426cdb65b..c021eb89ba 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -75,6 +75,10 @@ struct WebPornMediaLibrary {
+     int (*streamData)(wpmedia_player*, unsigned, const void*, unsigned long);
+     void (*streamEnd)(wpmedia_player*, unsigned, int);
+     void (*setFullscreen)(wpmedia_player*, int);
++    int (*proxyURL)(wpmedia_player*, const char*, char*, unsigned long);
++    void (*fetchResponse)(wpmedia_player*, unsigned, int, long long, const char*, const char*);
++    void (*fetchData)(wpmedia_player*, unsigned, const void*, unsigned long);
++    void (*fetchEnd)(wpmedia_player*, unsigned, int);
+ };
+ 
+ static const WebPornMediaLibrary* mediaLibrary()
+@@ -112,6 +116,10 @@ static const WebPornMediaLibrary* mediaLibrary()
+         WP_RESOLVE(streamData, "wpmedia_stream_data");
+         WP_RESOLVE(streamEnd, "wpmedia_stream_end");
+         WP_RESOLVE(setFullscreen, "wpmedia_set_fullscreen");
++        WP_RESOLVE(proxyURL, "wpmedia_proxy_url");
++        WP_RESOLVE(fetchResponse, "wpmedia_fetch_response");
++        WP_RESOLVE(fetchData, "wpmedia_fetch_data");
++        WP_RESOLVE(fetchEnd, "wpmedia_fetch_end");
+ #undef WP_RESOLVE
+         library = &functions;
+     });
+@@ -173,6 +181,31 @@ private:
+     bool m_stopped { false };
+ };
+ 
++// One request of libWebPornMedia's proxy (what libVLC fetches for HLS), loaded
++// by the page's loader.
++class WebPornProxyFetchClient final : public PlatformMediaResourceClient {
++public:
++    static Ref<WebPornProxyFetchClient> create(WebPornMediaBridge& bridge, unsigned id) { return adoptRef(*new WebPornProxyFetchClient(bridge, id)); }
++
++private:
++    WebPornProxyFetchClient(WebPornMediaBridge& bridge, unsigned id)
++        : m_bridge(bridge)
++        , m_id(id)
++    {
++    }
++
++    void responseReceived(PlatformMediaResource&, const ResourceResponse&, CompletionHandler<void(ShouldContinuePolicyCheck)>&&) final;
++    void dataReceived(PlatformMediaResource&, const SharedBuffer&) final;
++    void accessControlCheckFailed(PlatformMediaResource&, const ResourceError&) final { finish(true); }
++    void loadFailed(PlatformMediaResource&, const ResourceError&) final { finish(true); }
++    void loadFinished(PlatformMediaResource&, const NetworkLoadMetrics&) final { finish(false); }
++    void finish(bool failed);
++
++    Ref<WebPornMediaBridge> m_bridge;
++    unsigned m_id;
++    bool m_finished { false };
++};
++
+ class MediaPlayerPrivateWebPorn final : public MediaPlayerPrivateInterface, public RefCounted<MediaPlayerPrivateWebPorn>
+ #if ENABLE(MEDIA_SOURCE)
+     , public WebPornMediaSourceSink
+@@ -280,6 +313,11 @@ public:
+ 
+     // The stream, from WebPornMediaStreamClient and libWebPornMedia.
+     void startStreamLoad(unsigned generation, uint64_t offset);
++    void startFetch(unsigned id, const String& url, const String& range);
++    void cancelFetch(unsigned id);
++    void fetchResponse(unsigned id, const ResourceResponse&);
++    void fetchData(unsigned id, std::span<const uint8_t>);
++    void fetchEnd(unsigned id, bool failed);
+     void streamResponse(unsigned generation, const ResourceResponse&);
+     bool streamData(unsigned generation, std::span<const uint8_t>);
+     void streamEnd(unsigned generation, bool failed);
+@@ -329,6 +367,7 @@ private:
+     mutable bool m_loadingProgressed { false };
+     String m_url;
+     RefPtr<PlatformMediaResource> m_resource;
++    HashMap<unsigned, RefPtr<PlatformMediaResource>> m_fetches; // the proxy's requests
+     unsigned m_streamGeneration { 0 };
+     bool m_streamOpened { false };
+ #if ENABLE(MEDIA_SOURCE)
+@@ -375,6 +414,14 @@ MediaPlayerPrivateWebPorn::MediaPlayerPrivateWebPorn(MediaPlayer& player)
+     client.fullscreen_action = [](void* context, wpmedia_fullscreen_action action) {
+         bridgeFrom(context).post([action](auto& player) { player.fullscreenAction(action); });
+     };
++    client.fetch = [](void* context, unsigned id, const char* url, const char* range) {
++        bridgeFrom(context).post([id, url = String::fromUTF8(url), range = range ? String::fromUTF8(range) : String()](auto& player) {
++            player.startFetch(id, url, range);
++        });
++    };
++    client.fetch_cancel = [](void* context, unsigned id) {
++        bridgeFrom(context).post([id](auto& player) { player.cancelFetch(id); });
++    };
+     client.stream_request = [](void* context, unsigned generation, unsigned long long offset) {
+         bridgeFrom(context).post([generation, offset](auto& player) { player.startStreamLoad(generation, offset); });
+     };
+@@ -392,6 +439,10 @@ MediaPlayerPrivateWebPorn::~MediaPlayerPrivateWebPorn()
+         m_mediaSource->setSink(nullptr);
+ #endif
+     stopStreamLoad();
++    for (auto& resource : m_fetches.values()) {
++        resource->setClient(nullptr);
++        resource->shutdown();
++    }
+     m_bridge->detach();
+     // No callback runs after destroy returns; queued ones find the bridge detached.
+     if (m_media)
+@@ -412,9 +463,88 @@ void MediaPlayerPrivateWebPorn::load(const String& url)
+         startStreamLoad(0, 0);
+         return;
+     }
++    // HLS (libVLC's adaptive demuxer fetches by itself): through the proxy, so
++    // that playlists, segments and keys come from the page's loader.
++    static bool direct = !access("/var/webporn/media-direct", F_OK);
++    char proxied[8192];
++    URL parsed { url };
++    if (!direct && parsed.protocolIsInHTTPFamily() && m_library.proxyURL(m_media, url.utf8().data(), proxied, sizeof(proxied))) {
++        m_library.open(m_media, proxied, player->contentMIMEType().utf8().data(), nullptr, nullptr);
++        return;
++    }
+     m_library.open(m_media, url.utf8().data(), player->contentMIMEType().utf8().data(), player->userAgent().utf8().data(), player->referrer().utf8().data());
+ }
+ 
++void MediaPlayerPrivateWebPorn::startFetch(unsigned id, const String& url, const String& range)
++{
++    RefPtr player = m_player.get();
++    if (!player || !m_media) {
++        m_library.fetchEnd(m_media, id, 1);
++        return;
++    }
++    ResourceRequest request { URL { url } };
++    if (!range.isEmpty())
++        request.setHTTPHeaderField(HTTPHeaderName::Range, range);
++    RefPtr resource = player->mediaResourceLoader()->requestResource(WTF::move(request), PlatformMediaResourceLoader::LoadOption::DisallowCaching);
++    if (!resource) {
++        m_library.fetchEnd(m_media, id, 1);
++        return;
++    }
++    resource->setClient(WebPornProxyFetchClient::create(m_bridge, id));
++    m_fetches.set(id, WTF::move(resource));
++}
++
++void MediaPlayerPrivateWebPorn::cancelFetch(unsigned id)
++{
++    if (RefPtr resource = m_fetches.take(id)) {
++        resource->setClient(nullptr);
++        resource->shutdown();
++    }
++}
++
++void MediaPlayerPrivateWebPorn::fetchResponse(unsigned id, const ResourceResponse& response)
++{
++    String contentRange = response.httpHeaderField(HTTPHeaderName::ContentRange);
++    long long length = response.expectedContentLength() >= 0 ? response.expectedContentLength() : -1;
++    m_library.fetchResponse(m_media, id, response.httpStatusCode() ? response.httpStatusCode() : 200, length, response.mimeType().utf8().data(), contentRange.isEmpty() ? nullptr : contentRange.utf8().data());
++}
++
++void MediaPlayerPrivateWebPorn::fetchData(unsigned id, std::span<const uint8_t> bytes)
++{
++    m_loadingProgressed = true;
++    m_library.fetchData(m_media, id, bytes.data(), bytes.size());
++}
++
++void MediaPlayerPrivateWebPorn::fetchEnd(unsigned id, bool failed)
++{
++    m_fetches.remove(id);
++    m_library.fetchEnd(m_media, id, failed);
++}
++
++void WebPornProxyFetchClient::responseReceived(PlatformMediaResource&, const ResourceResponse& response, CompletionHandler<void(ShouldContinuePolicyCheck)>&& completionHandler)
++{
++    if (auto* player = m_bridge->player())
++        player->fetchResponse(m_id, response);
++    completionHandler(ShouldContinuePolicyCheck::Yes);
++}
++
++void WebPornProxyFetchClient::dataReceived(PlatformMediaResource&, const SharedBuffer& buffer)
++{
++    if (m_finished)
++        return;
++    if (auto* player = m_bridge->player())
++        player->fetchData(m_id, buffer.span());
++}
++
++void WebPornProxyFetchClient::finish(bool failed)
++{
++    if (m_finished)
++        return;
++    m_finished = true;
++    if (auto* player = m_bridge->player())
++        player->fetchEnd(m_id, failed);
++}
++
+ void MediaPlayerPrivateWebPorn::cancelLoad()
+ {
+     stopStreamLoad();
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+index 599c74882c..3d115681ef 100644
+--- a/Source/WebCore/platform/graphics/webporn/wpmedia.h
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -14,7 +14,7 @@
+ extern "C" {
+ #endif
+ 
+-#define WPMEDIA_ABI_VERSION 4
++#define WPMEDIA_ABI_VERSION 5
+ 
+ typedef struct wpmedia_player wpmedia_player;
+ 
+@@ -63,6 +63,12 @@ typedef struct {
+     void (*release)(void* context);
+     // The viewer used the full-screen window's controls (wpmedia_set_fullscreen).
+     void (*fullscreen_action)(void* context, wpmedia_fullscreen_action);
++    // Proxy (wpmedia_proxy_url): load this URL with the page's loader (cookies,
++    // TLS, the page's network stack) and answer through wpmedia_fetch_*. range
++    // is the Range header libVLC asked with, or NULL. fetch_cancel: the request
++    // went away (libVLC closed its connection); stop loading.
++    void (*fetch)(void* context, unsigned id, const char* url, const char* range);
++    void (*fetch_cancel)(void* context, unsigned id);
+ } wpmedia_client;
+ 
+ int wpmedia_abi_version(void);
+@@ -85,6 +91,16 @@ void* wpmedia_layer(wpmedia_player*);
+ // be NULL.
+ void wpmedia_open(wpmedia_player*, const char* url, const char* mime_type, const char* user_agent, const char* referrer);
+ 
++// The URL libVLC should open instead of url so that everything it fetches for it
++// (an HLS playlist, its media playlists and segments, keys) goes through the
++// client's fetch callback: a local HTTP proxy. Written to buffer (NUL
++// terminated); returns 0 when the proxy is not available (open url directly).
++int wpmedia_proxy_url(wpmedia_player*, const char* url, char* buffer, unsigned long size);
++// Answers to client.fetch, in this order: the response (status; length -1 when
++// unknown; content_type and content_range may be NULL), its bytes, the end.
++void wpmedia_fetch_response(wpmedia_player*, unsigned id, int status, long long length, const char* content_type, const char* content_range);
++void wpmedia_fetch_data(wpmedia_player*, unsigned id, const void* bytes, unsigned long length);
++void wpmedia_fetch_end(wpmedia_player*, unsigned id, int failed);
+ // Opens a byte stream the client delivers (WebCore's loader, MSE) instead of a
+ // URL: libVLC reads what arrives through wpmedia_stream_data. The client has
+ // already started loading from offset 0 with generation 0. size: total bytes,

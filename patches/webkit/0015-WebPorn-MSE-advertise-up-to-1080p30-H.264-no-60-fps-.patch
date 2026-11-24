@@ -1,0 +1,37 @@
+From cb18cc3f26cb8cd86f83d1bf3be858afe270f3d2 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:37:25 +0200
+Subject: [PATCH 15/24] WebPorn MSE: advertise up to 1080p30 H.264 (no 60 fps
+ levels, framerate/width/height parameters)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../graphics/webporn/WebPornMediaSource.cpp        | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+index d6edcddd47..218138da1f 100644
+--- a/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
++++ b/Source/WebCore/platform/graphics/webporn/WebPornMediaSource.cpp
+@@ -1189,7 +1189,21 @@ bool MediaSourcePrivateWebPorn::supportsType(const MediaEngineSupportParameters&
+         bool isAudioCodec = name.startsWith("mp4a"_s);
+         if (!(isAudioCodec || (video && isVideoCodec)))
+             return false;
++        // What an A6 plays without dropping frames: up to 1080p30. Levels 3.2 and
++        // 4.2+ are what 60 fps renditions are labelled with (YouTube offers those
++        // first and libVLC dropped half of the 1080p60 frames).
++        if (isVideoCodec && name.length() >= 11) {
++            auto level = parseInteger<unsigned>(StringView { name }.substring(9, 2), 16);
++            if (level && (*level > 0x28 || *level == 0x20))
++                return false;
++        }
+     }
++    // Extended parameters some players ask with (YouTube: width, height, framerate).
++    auto number = [&](ASCIILiteral name) {
++        return parameters.type.parameter(String { name }).toDouble();
++    };
++    if (number("framerate"_s) > 30.5 || number("height"_s) > 1080 || number("width"_s) > 1920)
++        return false;
+     codecsKnown = !codecs.isEmpty();
+     return true;
+ }

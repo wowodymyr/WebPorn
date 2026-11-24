@@ -1,0 +1,28 @@
+From 4886f9d011dcf94288e223612c5d4c30074fb190 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 09:41:05 +0200
+Subject: [PATCH 16/24] WebPorn: no AirPlay route target on iOS 8-10
+ (routingContextUID missing: Safari died when MSE audio changed the route)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WebCore/platform/audio/ios/MediaSessionHelperIOS.mm | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Source/WebCore/platform/audio/ios/MediaSessionHelperIOS.mm b/Source/WebCore/platform/audio/ios/MediaSessionHelperIOS.mm
+index b586fca606..47ccef4e8b 100644
+--- a/Source/WebCore/platform/audio/ios/MediaSessionHelperIOS.mm
++++ b/Source/WebCore/platform/audio/ios/MediaSessionHelperIOS.mm
+@@ -387,6 +387,12 @@ void MediaSessionHelperIOS::activeVideoRouteDidChange()
+ // WK26: AirPlay video routing needs AVOutputContext (iOS 11), so
+ // WIRELESS_PLAYBACK_TARGET is off.
+ #if ENABLE(WIRELESS_PLAYBACK_TARGET)
++#if defined(WK26_IOS_TARGET)
++    // WebPorn: iOS 8-10 have neither AVOutputContext nor -[AVAudioSession
++    // routingContextUID] (an unrecognized selector killed Safari on a route change).
++    if (!PAL::getAVOutputContextClassSingleton() || ![[PAL::getAVAudioSessionClassSingleton() sharedInstance] respondsToSelector:@selector(routingContextUID)])
++        return;
++#endif
+     Ref<MediaPlaybackTarget> target = MediaPlaybackTargetCocoa::create();
+     auto supportsRemoteVideoPlayback = target->supportsRemoteVideoPlayback() ? SupportsAirPlayVideo::Yes : SupportsAirPlayVideo::No;
+     MediaSessionHelper::activeVideoRouteDidChange(supportsRemoteVideoPlayback, WTF::move(target));

@@ -1,0 +1,31 @@
+From 6e0737afcc5ef70546adb4e05da477598fbfbbf3 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Mon, 23 Nov 2026 19:29:34 +0200
+Subject: [PATCH 03/24] WebPorn media: cap the interpolated clock at 1 s past
+ libVLC's time
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index 8d03dd5e7e..35067f723b 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -280,10 +280,13 @@ void MediaPlayerPrivateWebPorn::pause()
+ 
+ MediaTime MediaPlayerPrivateWebPorn::currentTime() const
+ {
+-    // libVLC reports the time a few times a second; run the clock in between.
++    // libVLC reports the time about four times a second; run the clock in
++    // between, but never more than a second ahead of it: when libVLC stalls
++    // (seeking, buffering) the clock must stall too, or WebCore would reach
++    // the duration and end playback early.
+     double time = m_time;
+     if (!m_paused && !m_seeking && !m_awaitingTimeAfterSeek && !m_ended && m_readyState >= MediaPlayer::ReadyState::HaveEnoughData)
+-        time += (MonotonicTime::now() - m_timeUpdated).seconds() * m_rate;
++        time += std::min((MonotonicTime::now() - m_timeUpdated).seconds() * m_rate, 1.0);
+     if (m_duration > 0 && time > m_duration)
+         time = m_duration;
+     return MediaTime::createWithDouble(std::max(time, 0.0));

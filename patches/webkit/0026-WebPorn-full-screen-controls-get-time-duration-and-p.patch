@@ -1,0 +1,184 @@
+From 3315b9e611f39ef080c45312f4bc4cf197069836 Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 14:42:02 +0200
+Subject: [PATCH 26/26] WebPorn: full-screen controls get time, duration and
+ play state; seeks from the scrubber
+
+MediaPlayerPrivateWebPorn pushes currentTime / duration / playing to libWebPornMedia
+(wpmedia_set_fullscreen_state) while in full screen and turns WPMEDIA_FULLSCREEN_SEEK
+into element.currentTime = wpmedia_fullscreen_seek_time(), so MSE seeks go through
+the page. Both entry points are optional (dlsym), same ABI 5.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../webporn/MediaPlayerPrivateWebPorn.mm      | 31 ++++++++++++++++++-
+ .../platform/graphics/webporn/wpmedia.h       | 14 +++++++--
+ 2 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+index c021eb89ba..544dbf4be7 100644
+--- a/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
++++ b/Source/WebCore/platform/graphics/webporn/MediaPlayerPrivateWebPorn.mm
+@@ -40,6 +40,7 @@
+ #import "MediaSourcePrivateClient.h"
+ #import "WebPornMediaSource.h"
+ #endif
++#import <wtf/Scope.h>
+ #import "wpmedia.h"
+ #import <QuartzCore/QuartzCore.h>
+ #import <dlfcn.h>
+@@ -79,6 +80,9 @@ struct WebPornMediaLibrary {
+     void (*fetchResponse)(wpmedia_player*, unsigned, int, long long, const char*, const char*);
+     void (*fetchData)(wpmedia_player*, unsigned, const void*, unsigned long);
+     void (*fetchEnd)(wpmedia_player*, unsigned, int);
++    // Optional (newer libWebPornMedia, same ABI): the full-screen controls' state and seeks.
++    void (*setFullscreenState)(wpmedia_player*, double, double, int);
++    double (*fullscreenSeekTime)(wpmedia_player*);
+ };
+ 
+ static const WebPornMediaLibrary* mediaLibrary()
+@@ -121,6 +125,8 @@ static const WebPornMediaLibrary* mediaLibrary()
+         WP_RESOLVE(fetchData, "wpmedia_fetch_data");
+         WP_RESOLVE(fetchEnd, "wpmedia_fetch_end");
+ #undef WP_RESOLVE
++        functions.setFullscreenState = reinterpret_cast<decltype(functions.setFullscreenState)>(dlsym(handle, "wpmedia_set_fullscreen_state"));
++        functions.fullscreenSeekTime = reinterpret_cast<decltype(functions.fullscreenSeekTime)>(dlsym(handle, "wpmedia_fullscreen_seek_time"));
+         library = &functions;
+     });
+     return library;
+@@ -251,6 +257,7 @@ public:
+     bool supportsFullscreen() const final { return true; }
+     void setVideoFullscreenMode(MediaPlayer::VideoFullscreenMode) final;
+     void fullscreenAction(wpmedia_fullscreen_action);
++    void updateFullscreenState();
+ 
+     FloatSize naturalSize() const final { return m_naturalSize; }
+ #if ENABLE(MEDIA_SOURCE)
+@@ -355,6 +362,7 @@ private:
+     MonotonicTime m_timeUpdated;
+     double m_rate { 1 };
+     bool m_paused { true };
++    bool m_fullscreen { false };
+     bool m_seeking { false };
+     bool m_awaitingTimeAfterSeek { false };
+     bool m_ended { false };
+@@ -554,6 +562,7 @@ void MediaPlayerPrivateWebPorn::cancelLoad()
+ 
+ void MediaPlayerPrivateWebPorn::play()
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     if (!m_media)
+         return;
+     m_paused = false;
+@@ -567,6 +576,7 @@ void MediaPlayerPrivateWebPorn::play()
+ 
+ void MediaPlayerPrivateWebPorn::pause()
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     if (!m_media)
+         return;
+     m_time = currentTime().toDouble();
+@@ -594,6 +604,7 @@ MediaTime MediaPlayerPrivateWebPorn::currentTime() const
+ 
+ void MediaPlayerPrivateWebPorn::seekToTarget(const SeekTarget& target)
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     if (!m_media)
+         return;
+ #if ENABLE(MEDIA_SOURCE)
+@@ -921,6 +932,7 @@ void MediaPlayerPrivateWebPorn::endMediaSourceStream()
+ 
+ void MediaPlayerPrivateWebPorn::mediaSourceDurationChanged()
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     if (RefPtr player = m_player.get())
+         player->durationChanged();
+ }
+@@ -936,6 +948,7 @@ void MediaPlayerPrivateWebPorn::mediaSourceActiveSourceBuffersChanged()
+ 
+ void MediaPlayerPrivateWebPorn::stateChanged(wpmedia_state state)
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     RefPtr player = m_player.get();
+     switch (state) {
+     case WPMEDIA_STATE_PLAYING:
+@@ -973,6 +986,7 @@ void MediaPlayerPrivateWebPorn::stateChanged(wpmedia_state state)
+ 
+ void MediaPlayerPrivateWebPorn::metadataChanged(double duration, FloatSize size, bool hasVideo, bool hasAudio)
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     RefPtr player = m_player.get();
+     if (!player)
+         return;
+@@ -1001,6 +1015,7 @@ void MediaPlayerPrivateWebPorn::metadataChanged(double duration, FloatSize size,
+ 
+ void MediaPlayerPrivateWebPorn::timeChanged(double seconds)
+ {
++    auto fullscreenUpdate = makeScopeExit([this] { updateFullscreenState(); });
+     if (m_seeking || m_ended)
+         return;
+     if (m_timeFloor) {
+@@ -1056,8 +1071,19 @@ void MediaPlayerPrivateWebPorn::frameReady(RetainPtr<CGImageRef>&& frame)
+ 
+ void MediaPlayerPrivateWebPorn::setVideoFullscreenMode(MediaPlayer::VideoFullscreenMode mode)
+ {
++    m_fullscreen = mode == HTMLMediaElementEnums::VideoFullscreenModeStandard;
+     if (m_media)
+-        m_library.setFullscreen(m_media, mode == HTMLMediaElementEnums::VideoFullscreenModeStandard);
++        m_library.setFullscreen(m_media, m_fullscreen);
++    updateFullscreenState();
++}
++
++// What the full-screen window's time, scrubber and play button show.
++void MediaPlayerPrivateWebPorn::updateFullscreenState()
++{
++    if (!m_fullscreen || !m_media || !m_library.setFullscreenState)
++        return;
++    MediaTime total = duration();
++    m_library.setFullscreenState(m_media, currentTime().toDouble(), total.isFinite() ? total.toDouble() : 0, !m_paused && !m_ended);
+ }
+ 
+ void MediaPlayerPrivateWebPorn::fullscreenAction(wpmedia_fullscreen_action action)
+@@ -1073,6 +1099,9 @@ void MediaPlayerPrivateWebPorn::fullscreenAction(wpmedia_fullscreen_action actio
+         if (action == WPMEDIA_FULLSCREEN_EXIT) {
+             if (element->isFullscreen())
+                 element->exitFullscreen();
++        } else if (action == WPMEDIA_FULLSCREEN_SEEK) {
++            if (m_library.fullscreenSeekTime)
++                element->setCurrentTime(m_library.fullscreenSeekTime(m_media));
+         } else if (element->paused())
+             element->play();
+         else
+diff --git a/Source/WebCore/platform/graphics/webporn/wpmedia.h b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+index 3d115681ef..bb1381d822 100644
+--- a/Source/WebCore/platform/graphics/webporn/wpmedia.h
++++ b/Source/WebCore/platform/graphics/webporn/wpmedia.h
+@@ -37,6 +37,9 @@ typedef enum {
+ typedef enum {
+     WPMEDIA_FULLSCREEN_EXIT, // the client should leave full screen (and call wpmedia_set_fullscreen 0)
+     WPMEDIA_FULLSCREEN_TOGGLE_PLAYBACK,
++    // Seek to wpmedia_fullscreen_seek_time(). Sent only to clients that call
++    // wpmedia_set_fullscreen_state (the scrubber and skips are hidden otherwise).
++    WPMEDIA_FULLSCREEN_SEEK,
+ } wpmedia_fullscreen_action;
+ 
+ typedef struct {
+@@ -123,9 +126,16 @@ void wpmedia_set_rate(wpmedia_player*, float rate);
+ void wpmedia_set_volume(wpmedia_player*, float volume); // 0-1
+ void wpmedia_set_muted(wpmedia_player*, int muted);
+ 
+-// Shows the video in a window of its own over the whole screen (turned for a
+-// landscape video; a tap shows Done and play/pause), or puts it back in its layer.
++// Shows the video in a window of its own over the whole screen (it turns with the
++// device; a tap shows Done, play/pause, 10 s skips and a scrubber), or puts it back
++// in its layer.
+ void wpmedia_set_fullscreen(wpmedia_player*, int fullscreen);
++// Optional (same ABI version; look them up with dlsym): what the full-screen
++// controls show. Call on entering full screen and whenever time, duration (0 when
++// unknown / live) or play state change while in it.
++void wpmedia_set_fullscreen_state(wpmedia_player*, double time, double duration, int playing);
++// The time WPMEDIA_FULLSCREEN_SEEK asks for.
++double wpmedia_fullscreen_seek_time(wpmedia_player*);
+ // The current video frame as a CGImageRef (+1, the caller releases it), at most
+ // max_width pixels wide, or NULL. Blocks for a few hundred milliseconds
+ // (libVLC's snapshot: the frame is read back from the GPU); cache it.

@@ -1,7 +1,7 @@
 From cb18cc3f26cb8cd86f83d1bf3be858afe270f3d2 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 09:37:25 +0200
-Subject: [PATCH 15/25] WebPorn MSE: advertise up to 1080p30 H.264 (no 60 fps
+Subject: [PATCH 15/26] WebPorn MSE: advertise up to 1080p30 H.264 (no 60 fps
  levels, framerate/width/height parameters)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

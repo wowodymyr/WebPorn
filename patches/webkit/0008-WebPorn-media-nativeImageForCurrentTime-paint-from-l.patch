@@ -1,7 +1,7 @@
 From c53d413cbb06955276c2cba7411ce0615317d8a4 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 20:25:35 +0200
-Subject: [PATCH 08/25] WebPorn media: nativeImageForCurrentTime / paint from
+Subject: [PATCH 08/26] WebPorn media: nativeImageForCurrentTime / paint from
  libVLC snapshots
 
 First frame synchronously, then cached and refreshed in the background at

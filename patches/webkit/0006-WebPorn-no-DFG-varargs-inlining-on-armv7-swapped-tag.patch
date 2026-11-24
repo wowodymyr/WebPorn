@@ -1,7 +1,7 @@
 From 93d2b22aad376349c290b53df93ae634dcefd387 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 19:57:46 +0200
-Subject: [PATCH 06/25] WebPorn: no DFG varargs inlining on armv7 (swapped
+Subject: [PATCH 06/26] WebPorn: no DFG varargs inlining on armv7 (swapped
  tag/payload after OSR exit)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

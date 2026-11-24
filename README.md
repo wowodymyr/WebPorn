@@ -8,13 +8,13 @@ WebCore and WebKitLegacy instead of the iOS 8 engine: ES2023, modern CSS, WebP /
 
 ## Install
 
-Release: [WebPorn 1.0.1](https://github.com/wowodymyr/WebPorn/releases/tag/1.0.1).
+Release: [WebPorn 1.0.2](https://github.com/wowodymyr/WebPorn/releases/tag/1.0.2).
 Install these three packages (Filza, `dpkg -i`, or your own repo), then respring:
 
 | Package | What | Where |
 |---|---|---|
 | `com.skyglow.tlsfix` | TLSFix: modern TLS for CFNetwork (by nfzerox, Requis) | [nfzerox/TLSFix releases](https://github.com/nfzerox/TLSFix/releases) |
-| `net.webporn.libvlc` | media engine: libVLC 3.0.18 + libWebPornMedia | [wowodymyr/libvlc releases](https://github.com/wowodymyr/libvlc/releases) |
+| `net.webporn.libvlc` | media engine: libVLC 3.0.18 + libWebPornMedia | [wowodymyr/libvlc releases](https://github.com/wowodymyr/libvlc/releases) (1.0.1+) |
 | `net.webporn` | the engine, the swap tweaks, Settings > WebPorn | [releases](https://github.com/wowodymyr/WebPorn/releases) |
 
 Also needed (from the usual repos): Cydia Substrate, PreferenceLoader, AppList.

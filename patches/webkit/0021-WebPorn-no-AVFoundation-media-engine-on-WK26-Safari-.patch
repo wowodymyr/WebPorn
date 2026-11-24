@@ -1,7 +1,7 @@
 From 8c4368668e37c1fabd0589504a1a5267d3aea05b Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 11:28:32 +0200
-Subject: [PATCH 21/25] WebPorn: no AVFoundation media engine on WK26 (Safari
+Subject: [PATCH 21/26] WebPorn: no AVFoundation media engine on WK26 (Safari
  turned it on; crashed on iOS 8), modern Safari tokens in the UA, Safari's
  default-on features in WebKitLegacy (MediaCapabilities, Navigation API, lazy
  loading...), MediaCapabilities for H.264 without VTIsHardwareDecodeSupported

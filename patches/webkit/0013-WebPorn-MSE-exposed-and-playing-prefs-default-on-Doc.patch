@@ -1,7 +1,7 @@
 From 2ce1b6af7ef140129727e6dc6754c58d9fdae3a6 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 09:20:12 +0200
-Subject: [PATCH 13/25] WebPorn: MSE exposed and playing (prefs default on,
+Subject: [PATCH 13/26] WebPorn: MSE exposed and playing (prefs default on,
  DocumentLoader keeps the preference, no Cocoa WebM sources)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

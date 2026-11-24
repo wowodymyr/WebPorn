@@ -1,7 +1,7 @@
 From 72126e88519f451c3f124aac786b00d5601eeae7 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 10:15:49 +0200
-Subject: [PATCH 19/25] WebPorn: send device-width/height to UIKit as numbers
+Subject: [PATCH 19/26] WebPorn: send device-width/height to UIKit as numbers
  (iOS 8 Safari laid width=device-width pages out 980 wide)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From bde40eb6e23135e4968fdabc25ea8fa00a88be01 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 19:21:38 +0200
-Subject: [PATCH 02/25] WebPorn: MediaPlayerPrivateWebPorn (libVLC through
+Subject: [PATCH 02/26] WebPorn: MediaPlayerPrivateWebPorn (libVLC through
  libWebPornMedia)
 
 Registered on WK26_IOS_TARGET when /var/webporn/lib/libWebPornMedia.dylib

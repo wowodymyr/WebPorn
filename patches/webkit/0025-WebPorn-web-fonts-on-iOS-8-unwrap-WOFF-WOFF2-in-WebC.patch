@@ -1,7 +1,7 @@
 From 0fe764e44af587d487cf2b1941f7aeea488cb7ee Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 13:45:45 +0200
-Subject: [PATCH 25/25] WebPorn: web fonts on iOS 8: unwrap WOFF/WOFF2 in
+Subject: [PATCH 25/26] WebPorn: web fonts on iOS 8: unwrap WOFF/WOFF2 in
  WebCore, data fonts without FontParser
 
 - HAVE_WOFF_SUPPORT off for WK26_IOS_TARGET: iOS 8 CoreText takes no WOFF2, so the

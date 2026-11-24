@@ -180,41 +180,8 @@ toolchain/build-libcxx.sh arm64 10.0 iPhoneOS10.3 && toolchain/build-compat.sh a
 toolchain/build-libcxx.sh armv7 8.0  iPhoneOS9.3  && toolchain/build-compat.sh armv7 8.0  iPhoneOS9.3
 ```
 
-## Running the engine on the device (armv7, iPhone 5 / iOS 8.4.1)
+## Gotchas found on the way
 
-Status 2026-11-23: a stock UIWebView app (`tests/wptest`) runs WebPorn after the
-in-process engine swap; modern sites (en.m.wikipedia.org) load over TLSFix (package `com.skyglow.tlsfix`).
-Screenshots: `device/iphone5-8.4.1/results/`.
-
-```sh
-device/deploy-webkit.sh armv7-ios8 iphone   # JSC + WebCore + WebKitLegacy -> /var/webporn/lib
-tweak/build.sh                             # WebPornSwap.dylib (Substrate, filter: net.webporn.wptest)
-tests/wptest/build.sh                      # WPTest.app; `uiopen wptest:` on the device
-device/last-crash.py WPTest                # newest crash report, WebPorn frames symbolized
-```
-
-WPBox (`tests/wptest/build-box.sh`) is the same app installed the way an App Store app is
-(an .ipa into a container through `LSApplicationWorkspace`, `tests/wptest/mi-install.m` signed on
-the device with `device/entitlements/mi-install.xml`; sandboxed, no entitlements, so no JIT). It
-reads its files from its Documents directory and is switched on in `net.webporn.swap.plist`
-(`Enabled-net.webporn.wpbox`). Sandboxed, the swapped engine loads sites over TLSFix and plays
-MSE video. Both apps have a 568h launch image (they ran letterboxed at 320x480 before).
-
-WPTest loads `/var/mobile/Media/webporn/url.txt` (or `test.html`) and writes
-`result.txt` (JS probes), `screenshot.png` and `error.txt` there. Headless tests
-without UIKit: `tests/webview-smoke.m` (WebView + JS + PNG via `_drawRect:`),
-`tests/dlopen-test.c` (RTLD_NOW load of each framework).
-
-`tweak/WebPornSwap.m` follows ref/engine-swap.md on iOS 8: class names via
-NXMapInsert into gdb_objc_realized_classes; dlopen; rebind every bind / weak / lazy
-slot into the old images (only UIKit has any at launch, 101; DataDetectorsUI,
-CorePDF and QuickLook load later and are rebound from the add-image callback);
-dlsym hooked instead of individual soft-linked functions; UIKit's ~40 categories on
-DOM/WebFrame classes re-attached. `/var/webporn/swap-dryrun` = log only
-(`/var/mobile/Media/webporn/swap.log`). Lookups use RTLD_FIRST handles: a plain
-handle also searches the image's dependencies, which include the old engine via UIKit.
-
-Gotchas found on the way:
 - iOS 8 `class_copyMethodList` / `class_addMethod` do not realize the class; call
   `class_respondsToSelector` first. 32-bit `class_t.bits` data mask is `~3`.
 - Unrecognized selectors are the main runtime failure. `toolchain/objc-selector-audit.py

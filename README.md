@@ -221,7 +221,7 @@ Gotchas found on the way:
   AVKit (`-[UIWindow windowScene]`). `tests/media/video.html` logs the media events (WPTest,
   `capture-delay.txt`); Safari plays after a tap. VNC (Veency) shows the libVLC GL layer full
   screen; the real screen / in-app capture is right. Known: control icons missing (square play
-  glyph), seek requested before preroll lands late, `paint()` empty (canvas drawImage(video)), no MSE.
+  glyph), seek requested before preroll lands late, `paint()` empty (canvas drawImage(video)).
   Media bytes come from WebCore's loader (ABI 3 stream input: `wpmedia_open_stream` /
   `stream_data` / `stream_request` over `libvlc_media_new_callbacks`): cookies, CORS, blob: and
   data: URLs work. libVLC reads from an 8 MB window (1 MB kept behind); a seek outside it makes
@@ -229,6 +229,33 @@ Gotchas found on the way:
   still go to libVLC by URL, and so does everything with `/var/webporn/media-direct`.
   Tests: `tests/media/stream.html` (`#<url>`, `#blob`), `tests/media/cookie.html`
   (`tests/serve.py` serves `/private/` only with the cookie `wp=1`).
+- Media Source Extensions (`ENABLE_MEDIA_SOURCE` on, `platform/graphics/webporn/WebPornMediaSource.cpp`):
+  SourceBufferPrivateWebPorn parses fragmented MP4 (H.264 + AAC); the samples WebCore enqueues
+  from all source buffers are interleaved by DTS into one live Matroska stream that goes into
+  libWebPornMedia's stream input (`:demux=mkv`). A seek (or a flush) starts a new stream at the
+  target on the same video output. YouTube (m.youtube.com, Safari and WPTest) plays this way:
+  720p30, seeks, ~0 dropped frames. Things that were needed:
+  - WebCore: the Cocoa (AVStreamDataParser / libwebm) MSE engine is not built on WK26
+    (`HAVE_AVSTREAMDATAPARSER` / `HAVE_WEBM_SOURCE_BUFFER_PARSER` 0); `MediaSourceEnabled`
+    defaults on for iPhones, and `DocumentLoader::applyPoliciesToSettings` keeps the
+    preference instead of the iOS platform default (off). The tweak also sets
+    `WebKitMediaSourceEnabled` in the argument domain (`/var/webporn/no-mse` turns MSE off).
+  - `isTypeSupported`: mp4 avc1/avc3/mp4a only, H.264 levels up to 4.0 except 3.2 (60 fps
+    renditions), `framerate` <= 30, `height` <= 1080: YouTube picked 1080p60 otherwise and
+    libVLC dropped half of the frames.
+  - libVLC 3's mkv demuxer cannot open a non-seekable input (not even ffmpeg's live mkv through
+    `fd://0`): live streams get a seek callback that moves inside the window or forward.
+  - Matroska `DefaultDuration` on the video track: libVLC derives P-frame DTS from it; without it
+    the input clock moved only on key frames (time updates every 2-4 s, YouTube saw a stall
+    and rebuilt its player).
+  - The first stream waits until every source buffer has tracks; during a restart, samples
+    of a track that is not re-enqueued yet are dropped (they continue the old position).
+  - End of a live stream = paused by `:play-and-pause` with the input read to the end.
+  Debug (`/var/webporn/wpmedia-debug`): `mse.log` (muxer), `stream-<n>.mkv` (the streams libVLC
+  got). Test page `tests/media/mse.html` (two fMP4 source buffers, seek to 20 s, ended).
+  WPTest: `capture-repeat.txt` (probe every N s into `results.txt`), `prefs.txt` (report
+  WebPreferences values). Also fixed on the way: Safari died on an audio route change
+  (`-[AVAudioSession routingContextUID]` is iOS 11; AirPlay target skipped on WK26).
 - libVLC: `toolchain/prepare-vlc.sh armv7 armv7-ios8` thins MobileVLCKit 3.5.1 (libvlc
   3.0.18, last release for iOS 8.4; dylib, all newer imports weak) into
   `prebuilt/armv7-ios8/vlc`, install name `/var/webporn/lib/MobileVLCKit.framework/MobileVLCKit`.

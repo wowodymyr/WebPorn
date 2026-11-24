@@ -89,6 +89,28 @@ static NSString *const kProbe =
     UIGraphicsEndImageContext();
     [UIImagePNGRepresentation(image) writeToFile:[kDir stringByAppendingPathComponent:@"screenshot.png"] atomically:YES];
     NSLog(@"WPTest: captured: %@", result);
+    // capture-repeat.txt: probe again every that many seconds, appending to results.txt.
+    double repeat = [[NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"capture-repeat.txt"] encoding:NSUTF8StringEncoding error:nil] doubleValue];
+    if (repeat > 0)
+        [self performSelector:@selector(probeAgain) withObject:nil afterDelay:repeat];
+}
+
+- (void)probeAgain
+{
+    NSString *probe = [NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"probe.js"] encoding:NSUTF8StringEncoding error:nil] ?: kProbe;
+    NSString *line = [NSString stringWithFormat:@"%.1f %@\n", [[NSProcessInfo processInfo] systemUptime], [self.webView stringByEvaluatingJavaScriptFromString:probe]];
+    NSString *path = [kDir stringByAppendingPathComponent:@"results.txt"];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!handle) {
+        [line writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+    }
+    double repeat = [[NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"capture-repeat.txt"] encoding:NSUTF8StringEncoding error:nil] doubleValue];
+    if (repeat > 0)
+        [self performSelector:@selector(probeAgain) withObject:nil afterDelay:repeat];
 }
 
 @end

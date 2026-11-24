@@ -8,7 +8,7 @@ WebCore and WebKitLegacy instead of the iOS 8 engine: ES2023, modern CSS, WebP /
 
 ## Install
 
-Release: [WebPorn 1.0.0](https://github.com/wowodymyr/WebPorn/releases/tag/1.0.0).
+Release: [WebPorn 1.0.1](https://github.com/wowodymyr/WebPorn/releases/tag/1.0.1).
 Install these three packages (Filza, `dpkg -i`, or your own repo), then respring:
 
 | Package | What | Where |

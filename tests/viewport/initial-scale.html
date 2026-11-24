@@ -1,0 +1,14 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viewport</title>
+<!-- width=device-width, initial-scale=1: what the page gets. -->
+<style>body{font:20px sans-serif;margin:8px}</style>
+<pre id="o"></pre>
+<script>
+function show() {
+  document.getElementById('o').textContent = ['innerWidth ' + innerWidth, 'clientWidth ' + document.documentElement.clientWidth,
+    'screen ' + screen.width + 'x' + screen.height, 'dpr ' + devicePixelRatio,
+    'vv scale ' + (window.visualViewport ? visualViewport.scale.toFixed(3) + ' w ' + visualViewport.width : '-')].join('\n');
+}
+show(); addEventListener('resize', show); setTimeout(show, 1500);
+</script>

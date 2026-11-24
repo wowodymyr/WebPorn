@@ -263,8 +263,20 @@ Gotchas found on the way:
   - The first stream waits until every source buffer has tracks; during a restart, samples
     of a track that is not re-enqueued yet are dropped (they continue the old position).
   - End of a live stream = paused by `:play-and-pause` with the input read to the end.
+  - Soft seeks: a seek up to 1.5 s ahead of playback into what the stream already holds does
+    not restart it (re-enqueued samples already written are dropped). hls.js seeks to where its
+    buffer starts and then nudges the playhead; with restarts (and the ~2.5 s video-output setup
+    before the first frame starting over each time) it gave up with bufferStalledError.
+  - Non-reference pictures before a seek target are not sent (post-seek drops 127 -> 60).
+  Sites (2026-11-24): YouTube plays (Safari, WPTest, WPBox); hls.js streams play
+  (`tests/media/hlsjs.html#<m3u8>`, TS and fMP4); Reddit's feed players play. Vimeo serves
+  FairPlay HLS (`playlist/drm/cbcs`) to iOS for some videos (cannot work), and for others its
+  player stops after the master playlist although the same stream plays through plain hls.js.
+  Dailymotion / Streamable players need a tap (not probed). `tests/media/sites/run.sh <url>`
+  starts the first `<video>` (also in shadow roots and same-origin frames) and logs its state.
   Debug (`/var/webporn/wpmedia-debug`): `mse.log` (muxer), `stream-<n>.mkv` (the streams libVLC
-  got). Test page `tests/media/mse.html` (two fMP4 source buffers, seek to 20 s, ended).
+  got), `sourcebuffer-<n>.mp4` (what pages appended). `/var/webporn/console-log`: every console
+  message of every page to `console-<process>.log`. Test page `tests/media/mse.html` (two fMP4 source buffers, seek to 20 s, ended).
   WPTest: `capture-repeat.txt` (probe every N s into `results.txt`), `prefs.txt` (report
   WebPreferences values). Also fixed on the way: Safari died on an audio route change
   (`-[AVAudioSession routingContextUID]` is iOS 11; AirPlay target skipped on WK26).

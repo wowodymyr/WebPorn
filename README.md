@@ -220,8 +220,8 @@ Gotchas found on the way:
   `enterFullscreen` refused without player support): the WebKit1 fullscreen path needs iOS 13
   AVKit (`-[UIWindow windowScene]`). `tests/media/video.html` logs the media events (WPTest,
   `capture-delay.txt`); Safari plays after a tap. VNC (Veency) shows the libVLC GL layer full
-  screen; the real screen / in-app capture is right. Known: control icons missing (square play
-  glyph), seek requested before preroll lands late, `paint()` empty (canvas drawImage(video)).
+  screen; the real screen / in-app capture is right. Control icons, early seeks and canvas
+  drawImage(video) (libVLC snapshots, refreshed every 250 ms) were fixed later.
   Media bytes come from WebCore's loader (ABI 3 stream input: `wpmedia_open_stream` /
   `stream_data` / `stream_request` over `libvlc_media_new_callbacks`): cookies, CORS, blob: and
   data: URLs work. libVLC reads from an 8 MB window (1 MB kept behind); a seek outside it makes

@@ -280,10 +280,12 @@ Gotchas found on the way:
     before the first frame starting over each time) it gave up with bufferStalledError.
   - Non-reference pictures before a seek target are not sent (post-seek drops 127 -> 60).
   Sites (2026-11-24): YouTube plays (Safari, WPTest, WPBox); hls.js streams play
-  (`tests/media/hlsjs.html#<m3u8>`, TS and fMP4); Reddit's feed players play. Vimeo serves
-  FairPlay HLS (`playlist/drm/cbcs`) to iOS for some videos (cannot work), and for others its
-  player stops after the master playlist although the same stream plays through plain hls.js.
-  Dailymotion / Streamable players need a tap (not probed). `tests/media/sites/run.sh <url>`
+  (`tests/media/hlsjs.html#<m3u8>`, TS and fMP4); Reddit's feed players play; Vimeo plays
+  when its own player starts (a tap, or `?autoplay=1`; a bare `video.play()` bypasses it),
+  except videos served as FairPlay HLS (`playlist/drm/cbcs`) to iOS; Streamable plays
+  (it used AVFoundation before: a URL with no MIME type took the first engine). Dailymotion
+  accepts the browser now (modern UA tokens, `navigator.mediaCapabilities`) but its player
+  waits on the Google IMA ad bridge and does not start. `tests/media/sites/run.sh <url>`
   starts the first `<video>` (also in shadow roots and same-origin frames) and logs its state.
   Debug (`/var/webporn/wpmedia-debug`): `mse.log` (muxer), `stream-<n>.mkv` (the streams libVLC
   got), `sourcebuffer-<n>.mp4` (what pages appended). `/var/webporn/console-log`: every console

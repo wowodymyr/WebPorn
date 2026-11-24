@@ -237,8 +237,13 @@ Gotchas found on the way:
   Media bytes come from WebCore's loader (ABI 3 stream input: `wpmedia_open_stream` /
   `stream_data` / `stream_request` over `libvlc_media_new_callbacks`): cookies, CORS, blob: and
   data: URLs work. libVLC reads from an 8 MB window (1 MB kept behind); a seek outside it makes
-  the library ask for a new HTTP range (a new generation; stale data is dropped). HLS and file:
-  still go to libVLC by URL, and so does everything with `/var/webporn/media-direct`.
+  the library ask for a new HTTP range (a new generation; stale data is dropped). HLS goes
+  through a local proxy in libWebPornMedia (ABI 5: `wpmedia_proxy_url`, `client.fetch`,
+  `wpmedia_fetch_*`): libVLC opens `http://127.0.0.1:<port>/<token>/<scheme>/<host>/<path>`, each
+  of its requests is loaded by the page's loader, and playlists are rewritten so that absolute
+  and root-relative URIs come back through the proxy (`tests/media/hls-cookie.html`: HLS behind
+  a cookie; `#nocookie` must fail). file: URLs are read by libVLC (the app's own files);
+  `/var/webporn/media-direct` sends everything to libVLC by URL as before.
   Tests: `tests/media/stream.html` (`#<url>`, `#blob`), `tests/media/cookie.html`
   (`tests/serve.py` serves `/private/` only with the cookie `wp=1`).
 - Media Source Extensions (`ENABLE_MEDIA_SOURCE` on, `platform/graphics/webporn/WebPornMediaSource.cpp`):

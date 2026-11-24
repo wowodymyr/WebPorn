@@ -1,0 +1,19 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>start</title>
+<!-- Native HLS behind a cookie: serve.py answers /private/ only with wp=1, so this
+     plays only when libVLC's requests go through the page's loader (the proxy).
+     #nocookie: without the cookie (must fail). -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline controls></video>
+<pre id="log"></pre>
+<script>
+const v = document.getElementById('v'), log = [], t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-10).join(' | '); }
+document.cookie = location.hash == '#nocookie' ? 'wp=; max-age=0; path=/' : 'wp=1; path=/';
+for (const e of ['loadedmetadata', 'playing', 'seeked', 'ended', 'error'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(1) + ' d=' + (v.duration || 0).toFixed(1) + (e == 'error' ? ' code=' + (v.error && v.error.code) : '')));
+setInterval(() => note('t=' + v.currentTime.toFixed(1) + ' rs=' + v.readyState), 3000);
+setTimeout(() => { note('seek 6'); v.currentTime = 6; }, 5000);
+v.src = '/private/media/hls-local/index.m3u8';
+</script>

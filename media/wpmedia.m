@@ -16,6 +16,9 @@
 #import <UIKit/UIKit.h>
 #include <math.h>
 #include <pthread.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -442,7 +445,11 @@ static void handleEvent(const libvlc_event_t* event, void* data)
             // A live (MSE) stream has no duration: its end is the end of the input.
             int inputEnded = p->live && p->stream && streamInputEnded(p->stream);
             debugLog("paused at %.2f, wants playing %d, input ended %d", time, p->wantsPlaying, inputEnded);
-            if (p->wantsPlaying && (inputEnded || (p->duration > 0 && time >= p->duration - 0.5))) {
+            // libVLC's clock trails the last frame (by most of a second for HLS,
+            // whose input clock moves by segments): an unrequested pause within
+            // the last two seconds is the end too.
+            double slack = p->duration > 0 ? MAX(0.5, MIN(2.0, p->duration * 0.2)) : 0;
+            if (p->wantsPlaying && (inputEnded || (p->duration > 0 && time >= p->duration - slack))) {
                 p->wantsPlaying = 0;
                 reportState(p, WPMEDIA_STATE_ENDED);
                 return;
@@ -760,6 +767,416 @@ static void streamDestroy(wpstream* s)
     free(s);
 }
 
+// MARK: - Proxy
+
+// libVLC fetches HLS itself (its adaptive demuxer has its own HTTP client), so
+// cookies, the page's TLS and network stack were not used. The proxy puts the
+// page's loader under it: libVLC opens
+//   http://127.0.0.1:<port>/<player token>/<scheme>/<host[:port]>/<path>?<query>
+// and each request it makes becomes a client.fetch. Relative references in
+// playlists resolve inside that layout by themselves; absolute and root-relative
+// ones are rewritten into it, so segments on other hosts go through it too.
+
+typedef struct wpfetch {
+    struct wpfetch* next;
+    unsigned id;
+    wpmedia_player* player; // NULL once the player is gone
+    pthread_cond_t changed;
+    int responded, ended, failed;
+    int status;
+    long long length;
+    char contentType[128];
+    char contentRange[96];
+    uint8_t* bytes;
+    size_t length_, capacity;
+} wpfetch;
+
+static pthread_mutex_t proxyLock = PTHREAD_MUTEX_INITIALIZER;
+static wpfetch* proxyFetches;
+static unsigned proxyNextID = 1;
+static int proxyPort;
+
+typedef struct proxyplayer {
+    struct proxyplayer* next;
+    wpmedia_player* player;
+    char token[24];
+} proxyplayer;
+static proxyplayer* proxyPlayers;
+
+static wpfetch* fetchWithID(unsigned id)
+{
+    for (wpfetch* fetch = proxyFetches; fetch; fetch = fetch->next) {
+        if (fetch->id == id)
+            return fetch;
+    }
+    return NULL;
+}
+
+static int writeAll(int fd, const void* bytes, size_t length)
+{
+    const uint8_t* cursor = bytes;
+    while (length) {
+        ssize_t written = write(fd, cursor, length);
+        if (written <= 0)
+            return 0;
+        cursor += written;
+        length -= (size_t)written;
+    }
+    return 1;
+}
+
+static NSString* proxiedURLString(NSURL* url, const char* token)
+{
+    NSString* scheme = url.scheme.lowercaseString;
+    if (!url.host || !([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]))
+        return url.absoluteString;
+    NSString* authority = url.port ? [NSString stringWithFormat:@"%@:%@", url.host, url.port] : url.host;
+    NSString* path = url.path.length ? [url.absoluteString substringFromIndex:[url.absoluteString rangeOfString:authority].location + authority.length] : @"/";
+    return [NSString stringWithFormat:@"http://127.0.0.1:%d/%s/%@/%@%@", proxyPort, token, scheme, authority, [path hasPrefix:@"/"] ? path : [@"/" stringByAppendingString:path]];
+}
+
+// Every URI of an HLS playlist (lines and URI="..." attributes) through the proxy.
+static NSData* rewritePlaylist(NSData* body, NSURL* base, const char* token)
+{
+    NSString* text = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (!text)
+        return body;
+    NSMutableArray* lines = [NSMutableArray array];
+    for (NSString* rawLine in [text componentsSeparatedByString:@"\n"]) {
+        NSString* line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!line.length) {
+            [lines addObject:line];
+            continue;
+        }
+        if (![line hasPrefix:@"#"]) {
+            NSURL* url = [NSURL URLWithString:line relativeToURL:base];
+            [lines addObject:url ? proxiedURLString(url.absoluteURL, token) : line];
+            continue;
+        }
+        NSMutableString* tag = [line mutableCopy];
+        NSRange search = NSMakeRange(0, tag.length);
+        for (;;) {
+            NSRange start = [tag rangeOfString:@"URI=\"" options:0 range:search];
+            if (start.location == NSNotFound)
+                break;
+            NSUInteger valueStart = NSMaxRange(start);
+            NSRange end = [tag rangeOfString:@"\"" options:0 range:NSMakeRange(valueStart, tag.length - valueStart)];
+            if (end.location == NSNotFound)
+                break;
+            NSString* value = [tag substringWithRange:NSMakeRange(valueStart, end.location - valueStart)];
+            NSURL* url = [NSURL URLWithString:value relativeToURL:base];
+            NSString* replacement = url ? proxiedURLString(url.absoluteURL, token) : value;
+            [tag replaceCharactersInRange:NSMakeRange(valueStart, end.location - valueStart) withString:replacement];
+            NSUInteger next = valueStart + replacement.length + 1;
+            search = NSMakeRange(next, tag.length - next);
+        }
+        [lines addObject:tag];
+    }
+    return [[lines componentsJoinedByString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static void* proxyConnection(void* argument)
+{
+    int fd = (int)(intptr_t)argument;
+    char request[16384];
+    size_t used = 0;
+    while (used < sizeof(request) - 1) {
+        ssize_t got = read(fd, request + used, sizeof(request) - 1 - used);
+        if (got <= 0)
+            break;
+        used += (size_t)got;
+        request[used] = 0;
+        if (strstr(request, "\r\n\r\n"))
+            break;
+    }
+    request[used] = 0;
+    char method[8] = "", path[8192] = "";
+    if (sscanf(request, "%7s %8191s", method, path) != 2 || (strcmp(method, "GET") && strcmp(method, "HEAD"))) {
+        close(fd);
+        return NULL;
+    }
+    char range[128] = "";
+    for (char* line = strstr(request, "\r\n"); line && line[2]; line = strstr(line + 2, "\r\n")) {
+        if (!strncasecmp(line + 2, "Range:", 6)) {
+            const char* value = line + 8;
+            while (*value == ' ')
+                value++;
+            size_t length = strcspn(value, "\r\n");
+            snprintf(range, sizeof(range), "%.*s", (int)length, value);
+        }
+    }
+    // /<token>/<scheme>/<authority>/<rest>
+    char token[24] = "", scheme[8] = "";
+    int consumed = 0;
+    if (sscanf(path, "/%23[^/]/%7[^/]/%n", token, scheme, &consumed) != 2 || !consumed) {
+        writeAll(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 66);
+        close(fd);
+        return NULL;
+    }
+    NSString* target = [NSString stringWithFormat:@"%s://%s", scheme, path + consumed];
+    pthread_mutex_lock(&proxyLock);
+    wpmedia_player* player = NULL;
+    for (proxyplayer* entry = proxyPlayers; entry; entry = entry->next) {
+        if (!strcmp(entry->token, token))
+            player = entry->player;
+    }
+    wpfetch* fetch = NULL;
+    wpmedia_client client = { };
+    if (player) {
+        fetch = calloc(1, sizeof(*fetch));
+        fetch->id = proxyNextID++;
+        fetch->player = player;
+        fetch->length = -1;
+        pthread_cond_init(&fetch->changed, NULL);
+        fetch->next = proxyFetches;
+        proxyFetches = fetch;
+        client = player->client;
+    }
+    pthread_mutex_unlock(&proxyLock);
+    if (!fetch || !client.fetch) {
+        writeAll(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 66);
+        close(fd);
+        return NULL;
+    }
+    unsigned id = fetch->id;
+    debugLog("proxy %u: %s %s%s%s", id, method, target.UTF8String, range[0] ? " " : "", range);
+    client.fetch(client.context, id, target.UTF8String, range[0] ? range : NULL);
+
+    pthread_mutex_lock(&proxyLock);
+    while (!fetch->responded && !fetch->failed && fetch->player)
+        pthread_cond_wait(&fetch->changed, &proxyLock);
+    int ok = fetch->responded && fetch->player;
+    int status = fetch->status ? fetch->status : 502;
+    long long length = fetch->length;
+    char contentType[128], contentRange[96];
+    strcpy(contentType, fetch->contentType);
+    strcpy(contentRange, fetch->contentRange);
+    pthread_mutex_unlock(&proxyLock);
+
+    int sendBody = strcmp(method, "HEAD") != 0;
+    int playlist = strcasestr(contentType, "mpegurl") || [[NSURL URLWithString:target].path.lowercaseString hasSuffix:@".m3u8"];
+    int clientWent = 0;
+    if (!ok) {
+        char header[160];
+        int size = snprintf(header, sizeof(header), "HTTP/1.1 %d Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status >= 400 ? status : 502);
+        writeAll(fd, header, (size_t)size);
+    } else if (playlist && status < 300) {
+        // Whole, then rewritten.
+        pthread_mutex_lock(&proxyLock);
+        while (!fetch->ended && !fetch->failed && fetch->player)
+            pthread_cond_wait(&fetch->changed, &proxyLock);
+        NSData* body = [NSData dataWithBytes:fetch->bytes length:fetch->length_];
+        int complete = fetch->ended && !fetch->failed;
+        pthread_mutex_unlock(&proxyLock);
+        if (complete) {
+            body = rewritePlaylist(body, [NSURL URLWithString:target], token);
+            char header[320];
+            int size = snprintf(header, sizeof(header), "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n",
+                contentType[0] ? contentType : "application/vnd.apple.mpegurl", (unsigned long)body.length);
+            writeAll(fd, header, (size_t)size);
+            if (sendBody)
+                writeAll(fd, body.bytes, body.length);
+        } else
+            writeAll(fd, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 68);
+    } else {
+        char header[512];
+        int size = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\n", status, status == 206 ? "Partial Content" : "OK");
+        if (contentType[0])
+            size += snprintf(header + size, sizeof(header) - (size_t)size, "Content-Type: %s\r\n", contentType);
+        if (length >= 0)
+            size += snprintf(header + size, sizeof(header) - (size_t)size, "Content-Length: %lld\r\n", length);
+        if (contentRange[0])
+            size += snprintf(header + size, sizeof(header) - (size_t)size, "Content-Range: %s\r\n", contentRange);
+        size += snprintf(header + size, sizeof(header) - (size_t)size, "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n");
+        clientWent = !writeAll(fd, header, (size_t)size);
+        // Stream as it arrives.
+        while (sendBody && !clientWent) {
+            pthread_mutex_lock(&proxyLock);
+            while (!fetch->length_ && !fetch->ended && !fetch->failed && fetch->player)
+                pthread_cond_wait(&fetch->changed, &proxyLock);
+            uint8_t* bytes = fetch->bytes;
+            size_t count = fetch->length_;
+            int done = (fetch->ended || fetch->failed || !fetch->player) && !count;
+            fetch->bytes = NULL;
+            fetch->length_ = fetch->capacity = 0;
+            pthread_mutex_unlock(&proxyLock);
+            if (count)
+                clientWent = !writeAll(fd, bytes, count);
+            free(bytes);
+            if (done)
+                break;
+        }
+    }
+    close(fd);
+
+    pthread_mutex_lock(&proxyLock);
+    int stillLoading = fetch->player && !fetch->ended && !fetch->failed;
+    for (wpfetch** link = &proxyFetches; *link; link = &(*link)->next) {
+        if (*link == fetch) {
+            *link = fetch->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&proxyLock);
+    if (stillLoading && client.fetch_cancel)
+        client.fetch_cancel(client.context, id);
+    debugLog("proxy %u: done (status %d%s)", id, status, clientWent ? ", libVLC went away" : "");
+    pthread_cond_destroy(&fetch->changed);
+    free(fetch->bytes);
+    free(fetch);
+    return NULL;
+}
+
+static void* proxyAccept(void* argument)
+{
+    int listener = (int)(intptr_t)argument;
+    for (;;) {
+        int fd = accept(listener, NULL, NULL);
+        if (fd < 0)
+            continue;
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        pthread_t thread;
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&thread, &attributes, proxyConnection, (void*)(intptr_t)fd))
+            close(fd);
+        pthread_attr_destroy(&attributes);
+    }
+    return NULL;
+}
+
+static int startProxy(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        int listener = socket(AF_INET, SOCK_STREAM, 0);
+        if (listener < 0)
+            return;
+        struct sockaddr_in address = { };
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t size = sizeof(address);
+        if (bind(listener, (struct sockaddr*)&address, sizeof(address)) || listen(listener, 16) || getsockname(listener, (struct sockaddr*)&address, &size)) {
+            close(listener);
+            return;
+        }
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, proxyAccept, (void*)(intptr_t)listener)) {
+            close(listener);
+            return;
+        }
+        pthread_detach(thread);
+        proxyPort = ntohs(address.sin_port);
+        debugLog("proxy on port %d", proxyPort);
+    });
+    return proxyPort;
+}
+
+int wpmedia_proxy_url(wpmedia_player* p, const char* url, char* buffer, unsigned long size)
+{
+    if (!p->client.fetch || !startProxy())
+        return 0;
+    NSURL* target = [NSURL URLWithString:@(url)];
+    if (!target)
+        return 0;
+    pthread_mutex_lock(&proxyLock);
+    proxyplayer* entry = NULL;
+    for (proxyplayer* candidate = proxyPlayers; candidate; candidate = candidate->next) {
+        if (candidate->player == p)
+            entry = candidate;
+    }
+    if (!entry) {
+        entry = calloc(1, sizeof(*entry));
+        entry->player = p;
+        snprintf(entry->token, sizeof(entry->token), "%08x%08x", arc4random(), arc4random());
+        entry->next = proxyPlayers;
+        proxyPlayers = entry;
+    }
+    char token[24];
+    strcpy(token, entry->token);
+    pthread_mutex_unlock(&proxyLock);
+    NSString* proxied = proxiedURLString(target, token);
+    if ([proxied isEqualToString:target.absoluteString])
+        return 0;
+    snprintf(buffer, size, "%s", proxied.UTF8String);
+    return 1;
+}
+
+// The player is going: its requests fail, its token stops working.
+static void proxyForget(wpmedia_player* p)
+{
+    pthread_mutex_lock(&proxyLock);
+    for (proxyplayer** link = &proxyPlayers; *link;) {
+        if ((*link)->player == p) {
+            proxyplayer* gone = *link;
+            *link = gone->next;
+            free(gone);
+        } else
+            link = &(*link)->next;
+    }
+    for (wpfetch* fetch = proxyFetches; fetch; fetch = fetch->next) {
+        if (fetch->player == p) {
+            fetch->player = NULL;
+            pthread_cond_broadcast(&fetch->changed);
+        }
+    }
+    pthread_mutex_unlock(&proxyLock);
+}
+
+void wpmedia_fetch_response(wpmedia_player* p, unsigned id, int status, long long length, const char* contentType, const char* contentRange)
+{
+    pthread_mutex_lock(&proxyLock);
+    wpfetch* fetch = fetchWithID(id);
+    if (fetch && fetch->player == p && !fetch->responded) {
+        fetch->responded = 1;
+        fetch->status = status;
+        fetch->length = length;
+        snprintf(fetch->contentType, sizeof(fetch->contentType), "%s", contentType ? contentType : "");
+        snprintf(fetch->contentRange, sizeof(fetch->contentRange), "%s", contentRange ? contentRange : "");
+        pthread_cond_broadcast(&fetch->changed);
+    }
+    pthread_mutex_unlock(&proxyLock);
+}
+
+void wpmedia_fetch_data(wpmedia_player* p, unsigned id, const void* bytes, unsigned long length)
+{
+    pthread_mutex_lock(&proxyLock);
+    wpfetch* fetch = fetchWithID(id);
+    if (fetch && fetch->player == p) {
+        if (fetch->length_ + length > fetch->capacity) {
+            size_t capacity = MAX(fetch->capacity * 2, fetch->length_ + length);
+            uint8_t* grown = realloc(fetch->bytes, capacity);
+            if (grown) {
+                fetch->bytes = grown;
+                fetch->capacity = capacity;
+            }
+        }
+        if (fetch->length_ + length <= fetch->capacity) {
+            memcpy(fetch->bytes + fetch->length_, bytes, length);
+            fetch->length_ += length;
+        } else
+            fetch->failed = 1;
+        pthread_cond_broadcast(&fetch->changed);
+    }
+    pthread_mutex_unlock(&proxyLock);
+}
+
+void wpmedia_fetch_end(wpmedia_player* p, unsigned id, int failed)
+{
+    pthread_mutex_lock(&proxyLock);
+    wpfetch* fetch = fetchWithID(id);
+    if (fetch && fetch->player == p) {
+        if (failed)
+            fetch->failed = 1;
+        else
+            fetch->ended = 1;
+        pthread_cond_broadcast(&fetch->changed);
+    }
+    pthread_mutex_unlock(&proxyLock);
+}
+
 // MARK: - Lifetime
 
 wpmedia_player* wpmedia_create(const wpmedia_client* client)
@@ -797,6 +1214,7 @@ void wpmedia_destroy(wpmedia_player* p)
     libvlc_event_manager_t* events = libvlc_media_player_event_manager(p->player);
     for (size_t i = 0; i < sizeof(handledEvents) / sizeof(*handledEvents); i++)
         libvlc_event_detach(events, handledEvents[i], handleEvent, p);
+    proxyForget(p);
     // A stream read in progress fails now, and no request reaches the client
     // after this returns.
     wpstream* stream = p->stream;

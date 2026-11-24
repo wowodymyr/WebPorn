@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define WPMEDIA_ABI_VERSION 4
+#define WPMEDIA_ABI_VERSION 5
 
 typedef struct wpmedia_player wpmedia_player;
 
@@ -63,6 +63,12 @@ typedef struct {
     void (*release)(void* context);
     // The viewer used the full-screen window's controls (wpmedia_set_fullscreen).
     void (*fullscreen_action)(void* context, wpmedia_fullscreen_action);
+    // Proxy (wpmedia_proxy_url): load this URL with the page's loader (cookies,
+    // TLS, the page's network stack) and answer through wpmedia_fetch_*. range
+    // is the Range header libVLC asked with, or NULL. fetch_cancel: the request
+    // went away (libVLC closed its connection); stop loading.
+    void (*fetch)(void* context, unsigned id, const char* url, const char* range);
+    void (*fetch_cancel)(void* context, unsigned id);
 } wpmedia_client;
 
 int wpmedia_abi_version(void);
@@ -85,6 +91,16 @@ void* wpmedia_layer(wpmedia_player*);
 // be NULL.
 void wpmedia_open(wpmedia_player*, const char* url, const char* mime_type, const char* user_agent, const char* referrer);
 
+// The URL libVLC should open instead of url so that everything it fetches for it
+// (an HLS playlist, its media playlists and segments, keys) goes through the
+// client's fetch callback: a local HTTP proxy. Written to buffer (NUL
+// terminated); returns 0 when the proxy is not available (open url directly).
+int wpmedia_proxy_url(wpmedia_player*, const char* url, char* buffer, unsigned long size);
+// Answers to client.fetch, in this order: the response (status; length -1 when
+// unknown; content_type and content_range may be NULL), its bytes, the end.
+void wpmedia_fetch_response(wpmedia_player*, unsigned id, int status, long long length, const char* content_type, const char* content_range);
+void wpmedia_fetch_data(wpmedia_player*, unsigned id, const void* bytes, unsigned long length);
+void wpmedia_fetch_end(wpmedia_player*, unsigned id, int failed);
 // Opens a byte stream the client delivers (WebCore's loader, MSE) instead of a
 // URL: libVLC reads what arrives through wpmedia_stream_data. The client has
 // already started loading from offset 0 with generation 0. size: total bytes,

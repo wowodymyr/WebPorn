@@ -22,6 +22,8 @@ static NSString *const kProbe =
 @interface WPAppDelegate : UIResponder <UIApplicationDelegate, UIWebViewDelegate>
 @property (nonatomic, strong) UIWindow *window;
 @property (nonatomic, strong) UIWebView *webView;
+@property (nonatomic) BOOL captured;
+@property (nonatomic) BOOL repeating;
 @end
 
 @implementation WPAppDelegate
@@ -51,6 +53,8 @@ static NSString *const kProbe =
     else
         [self.webView loadHTMLString:html ?: @"<h1>WPTest</h1><p>no test.html</p>" baseURL:[NSURL URLWithString:@"http://webporn.test/"]];
     NSLog(@"WPTest: loading %@", url.length ? url : @"test.html");
+    // Pages that never finish loading (video sites) are probed anyway.
+    [self performSelector:@selector(captureIfNeeded) withObject:nil afterDelay:20];
     return YES;
 }
 
@@ -71,8 +75,15 @@ static NSString *const kProbe =
     [self performSelector:@selector(capture) withObject:nil afterDelay:1];
 }
 
+- (void)captureIfNeeded
+{
+    if (!self.captured)
+        [self capture];
+}
+
 - (void)capture
 {
+    self.captured = YES;
     // probe.js, when present, replaces the built-in probe (any expression yielding a string).
     NSString *probe = [NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"probe.js"] encoding:NSUTF8StringEncoding error:nil] ?: kProbe;
     NSString *result = [self.webView stringByEvaluatingJavaScriptFromString:probe];
@@ -97,8 +108,10 @@ static NSString *const kProbe =
     NSLog(@"WPTest: captured: %@", result);
     // capture-repeat.txt: probe again every that many seconds, appending to results.txt.
     double repeat = [[NSString stringWithContentsOfFile:[kDir stringByAppendingPathComponent:@"capture-repeat.txt"] encoding:NSUTF8StringEncoding error:nil] doubleValue];
-    if (repeat > 0)
+    if (repeat > 0 && !self.repeating) {
+        self.repeating = YES;
         [self performSelector:@selector(probeAgain) withObject:nil afterDelay:repeat];
+    }
 }
 
 - (void)probeAgain

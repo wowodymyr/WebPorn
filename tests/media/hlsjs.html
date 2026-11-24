@@ -1,0 +1,25 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>start</title>
+<!-- hls.js (MSE) with its debug log in the console (/var/webporn/console-log).
+     #<m3u8 url> picks the stream; the default is Mux's public test stream (TS). -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<video id="v" muted autoplay playsinline controls></video>
+<pre id="log"></pre>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+<script>
+const v = document.getElementById('v'), log = [], t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.slice(-30).join('\n'); document.title = log.slice(-8).join(' | '); }
+window.onerror = (m, f, l) => note('JS error ' + m + ' ' + f + ':' + l);
+const src = location.hash.slice(1) || 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+note('Hls ' + typeof Hls + ' supported ' + (window.Hls && Hls.isSupported()));
+for (const e of ['loadedmetadata', 'playing', 'waiting', 'error'])
+  v.addEventListener(e, () => note(e + ' t=' + v.currentTime.toFixed(1) + ' rs=' + v.readyState));
+setInterval(() => note('t=' + v.currentTime.toFixed(1) + ' rs=' + v.readyState + ' buf=' + (v.buffered.length ? v.buffered.end(v.buffered.length - 1).toFixed(1) : '-')), 4000);
+const hls = new Hls({ debug: true, enableWorker: true });
+for (const ev of [Hls.Events.MANIFEST_PARSED, Hls.Events.LEVEL_LOADED, Hls.Events.FRAG_LOADED, Hls.Events.BUFFER_CREATED, Hls.Events.FRAG_BUFFERED])
+  hls.on(ev, (name, data) => note(name + (data.frag ? ' sn ' + data.frag.sn : '')));
+hls.on(Hls.Events.ERROR, (name, data) => note('ERROR ' + data.type + ' ' + data.details + ' ' + (data.fatal ? 'fatal' : '') + ' ' + (data.error || '')));
+hls.loadSource(src);
+hls.attachMedia(v);
+</script>

@@ -667,28 +667,26 @@ void wpmedia_destroy(wpmedia_player* p)
         pthread_cond_broadcast(&stream->changed);
         pthread_mutex_unlock(&stream->lock);
     }
-    dispatch_queue_t queue = p->queue;
-    libvlc_media_player_t* player = p->player;
-    libvlc_media_t* media = p->media;
     WPMediaLayer* layer = (__bridge_transfer WPMediaLayer*)p->layer;
-    // Queued work still uses p and the client: release both behind it.
-    dispatch_async(queue, ^{
-        if (p->client.release)
-            p->client.release(p->client.context);
-        free(p);
-    });
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        libvlc_media_player_stop(player);
-        libvlc_media_player_release(player);
-        if (media)
-            libvlc_media_release(media);
-        if (stream)
-            streamDestroy(stream);
+    // On p's own (serial, background) queue: a restart still queued there would
+    // otherwise set a new input after the player was stopped and play a stream
+    // freed here (a crash in libVLC's input thread when YouTube rebuilt its player).
+    // Queued work also still uses p and the client: release both at the end.
+    dispatch_async(p->queue, ^{
+        libvlc_media_player_stop(p->player);
+        libvlc_media_player_release(p->player);
+        if (p->media)
+            libvlc_media_release(p->media);
+        if (p->stream)
+            streamDestroy(p->stream);
         dispatch_async(dispatch_get_main_queue(), ^{
             [layer.drawable removeFromSuperview];
             [layer.drawable.layer removeFromSuperlayer];
             layer.drawable = nil;
         });
+        if (p->client.release)
+            p->client.release(p->client.context);
+        free(p);
     });
 }
 

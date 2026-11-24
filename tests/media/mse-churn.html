@@ -1,0 +1,41 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width">
+<title>start</title>
+<!-- MSE players made and dropped in quick succession (what YouTube does when it
+     rebuilds its player): each round appends both fMP4 files, plays ~0.7 s, seeks,
+     then drops the element. libWebPornMedia must not touch a freed stream. -->
+<style>body{font:12px sans-serif;margin:8px} video{width:100%;background:#000}</style>
+<div id="box"></div>
+<pre id="log"></pre>
+<script>
+const log = [], t0 = performance.now();
+function note(s) { log.push(((performance.now() - t0) / 1000).toFixed(1) + ' ' + s); document.getElementById('log').textContent = log.join('\n'); document.title = log.slice(-6).join(' | '); }
+window.onerror = (m) => note('JS error ' + m);
+const vt = 'video/mp4; codecs="avc1.4d401e"', at = 'audio/mp4; codecs="mp4a.40.2"';
+const files = Promise.all(['mse-video.mp4', 'mse-audio.mp4'].map(u => fetch(u).then(r => r.arrayBuffer())));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function append(sb, data) { return new Promise(r => { sb.addEventListener('updateend', r, { once: true }); sb.appendBuffer(data); }); }
+async function round(i, [video, audio]) {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true;
+  document.getElementById('box').appendChild(v);
+  const ms = new MediaSource();
+  v.src = URL.createObjectURL(ms);
+  await new Promise(r => ms.addEventListener('sourceopen', r, { once: true }));
+  const vb = ms.addSourceBuffer(vt), ab = ms.addSourceBuffer(at);
+  await Promise.all([append(vb, video.slice(0)), append(ab, audio.slice(0))]);
+  v.play().catch(() => {});
+  await sleep(300 + 100 * (i % 5));
+  v.currentTime = 10 + i;
+  await sleep(200 + 70 * (i % 4));
+  v.pause();
+  v.removeAttribute('src'); v.load();
+  v.remove();
+  note('round ' + i + ' done');
+}
+files.then(async data => {
+  for (let i = 0; i < 12; i++)
+    await round(i, data);
+  note('all done');
+}).catch(e => note('failed ' + e));
+</script>

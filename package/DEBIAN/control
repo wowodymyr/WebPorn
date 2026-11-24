@@ -1,6 +1,6 @@
 Package: net.webporn
 Name: WebPorn
-Version: 1.0.0
+Version: 1.0.1
 Architecture: iphoneos-arm
 Description: Modern WebKit (Safari 26) for iOS 8 on 32-bit devices: swaps the system engine in MobileSafari and any app you pick in Settings > WebPorn.
 Depends: firmware (>= 8.0), firmware (<< 9.0), mobilesubstrate, preferenceloader, applist, com.skyglow.tlsfix | com.tlsfix, net.webporn.libvlc (>= 1.0.0)

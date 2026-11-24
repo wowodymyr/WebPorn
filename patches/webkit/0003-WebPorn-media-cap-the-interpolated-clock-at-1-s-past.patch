@@ -1,7 +1,7 @@
 From 6e0737afcc5ef70546adb4e05da477598fbfbbf3 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 19:29:34 +0200
-Subject: [PATCH 03/24] WebPorn media: cap the interpolated clock at 1 s past
+Subject: [PATCH 03/25] WebPorn media: cap the interpolated clock at 1 s past
  libVLC's time
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From 4698c5a0fde9c02bc98ee6dd9a288479336e73cf Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 20:02:31 +0200
-Subject: [PATCH 07/24] WebPorn: no scrolling coordinator in WK1 iOS -> guard
+Subject: [PATCH 07/25] WebPorn: no scrolling coordinator in WK1 iOS -> guard
  LayerAncestorClippingStack
 
 YouTube's watch page crashed in updateWithClipData (overflow scroll marked

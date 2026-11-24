@@ -1,7 +1,7 @@
 From e8e98a0c022ab41d80630db5a748fe442ec311c3 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 11:58:39 +0200
-Subject: [PATCH 23/24] WebPorn JSC: Darwin armv7 ABI in LLInt's checkpoint OSR
+Subject: [PATCH 23/25] WebPorn JSC: Darwin armv7 ABI in LLInt's checkpoint OSR
  exit from an inlined call (EncodedJSValue in a1:a2, not a2:a3); varargs
  inlining back on
 

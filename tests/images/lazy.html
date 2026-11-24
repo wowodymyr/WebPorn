@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<style>
+body { margin: 0; font: 14px Helvetica; }
+#s { position: fixed; top: 0; left: 0; right: 0; background: #ff0; padding: 6px; z-index: 1; }
+.b { height: 300px; border-bottom: 1px solid #ccc; padding-top: 30px; }
+img { width: 160px; height: 120px; background: #ddd; display: block; }
+</style>
+<div id="s">-</div>
+<script>
+let loaded = 0, eager = 0;
+function upd() { s.textContent = `lazy loaded ${loaded}/20, eager ${eager}/2, scrollY ${Math.round(scrollY)}, inner ${innerHeight}`; }
+addEventListener('scroll', upd);
+for (let i = 0; i < 22; i++) {
+  const d = document.createElement('div'); d.className = 'b'; d.textContent = 'block ' + i;
+  const img = new Image(); img.src = 't.jpg?' + i;
+  if (i >= 2) img.loading = 'lazy';
+  img.onload = () => { i >= 2 ? loaded++ : eager++; upd(); };
+  d.appendChild(img); document.body.appendChild(d);
+}
+upd();
+</script>

@@ -1,7 +1,7 @@
 From d104e7e76d6f67abef2f0d7086b1fbae1b94d1b4 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 21:03:34 +0200
-Subject: [PATCH 10/24] WebPorn media: bytes from WebCore's loader (range
+Subject: [PATCH 10/25] WebPorn media: bytes from WebCore's loader (range
  requests) into libWebPornMedia's stream input
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

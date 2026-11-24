@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<style>
+@font-face { font-family: W2; src: url(rc.woff2) format("woff2"); }
+@font-face { font-family: TT; src: url(rc.ttf) format("truetype"); }
+body { font: 20px Helvetica; margin: 8px; }
+p { margin: 6px 0; }
+.w2 { font-family: W2, serif; } .tt { font-family: TT, serif; }
+</style>
+<p>system: Ім'я хоста: 78.26.214.22 Hello</p>
+<p class="w2">woff2: Ім'я хоста: 78.26.214.22 Hello</p>
+<p class="tt">ttf: Ім'я хоста: 78.26.214.22 Hello</p>
+<p class="w2">woff2: abcdefghijklmnopqrstuvwxyz</p>
+<p class="w2">woff2: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.,:;'</p>
+<p class="tt">ttf: abcdefghijklmnopqrstuvwxyz</p>
+<p class="w2">woff2: абвгдеєжзиіїйклмнопрстуфхцчшщьюя</p>
+<p id="r"></p>
+<script>
+document.fonts.ready.then(() => {
+  r.textContent = [...document.fonts].map(f => f.family + ":" + f.status).join(" ");
+});
+</script>

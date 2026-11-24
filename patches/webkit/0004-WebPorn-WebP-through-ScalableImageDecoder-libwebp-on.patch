@@ -1,7 +1,7 @@
 From def45502eb472951f0ba2bfc8b9610e60d7e3ab7 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Mon, 23 Nov 2026 19:38:11 +0200
-Subject: [PATCH 04/24] WebPorn: WebP through ScalableImageDecoder / libwebp on
+Subject: [PATCH 04/25] WebPorn: WebP through ScalableImageDecoder / libwebp on
  WK26_IOS_TARGET
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

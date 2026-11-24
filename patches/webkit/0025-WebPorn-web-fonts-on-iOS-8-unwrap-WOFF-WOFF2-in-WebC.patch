@@ -1,0 +1,64 @@
+From 0fe764e44af587d487cf2b1941f7aeea488cb7ee Mon Sep 17 00:00:00 2001
+From: wowodymyr <kokesiskigovno@gmail.com>
+Date: Tue, 24 Nov 2026 13:45:45 +0200
+Subject: [PATCH 25/25] WebPorn: web fonts on iOS 8: unwrap WOFF/WOFF2 in
+ WebCore, data fonts without FontParser
+
+- HAVE_WOFF_SUPPORT off for WK26_IOS_TARGET: iOS 8 CoreText takes no WOFF2, so the
+  raw .woff2 reached CTFontManagerCreateFontDescriptorFromData and every WOFF2 web
+  font became a font without a CTFont (blank glyphs, Times fallback, icon fonts as
+  boxes, crash in CTFontCreateForCharactersWithLanguageAndOption)
+- FontCustomPlatformData::create: no FontParser before iOS 11 (stub returns NULL),
+  hand the sfnt to CoreText as it is; a null descriptor fails the load
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WTF/wtf/PlatformHave.h                        |  4 ++--
+ .../coretext/FontCustomPlatformDataCoreText.cpp      | 12 ++++++++++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index c15d9f3e38..88ba3dd0a9 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -892,8 +892,8 @@
+ #define HAVE_CORE_TEXT_SBIX_IMAGE_SIZE_FUNCTIONS 1
+ #endif
+ 
+-/* WK26: iOS 6 CoreText accepts only sfnt data, so WebCore must unwrap WOFF/WOFF2 itself. */
+-#if PLATFORM(COCOA) && (!PLATFORM(IOS_FAMILY) || __IPHONE_OS_VERSION_MIN_REQUIRED >= 80000)
++/* WK26: iOS 6-10 CoreText accepts only sfnt data (iOS 8 takes no WOFF2), so WebCore must unwrap WOFF/WOFF2 itself. */
++#if PLATFORM(COCOA) && !defined(WK26_IOS_TARGET)
+ #define HAVE_WOFF_SUPPORT 1
+ #else
+ #define HAVE_WOFF_SUPPORT 0
+diff --git a/Source/WebCore/platform/graphics/coretext/FontCustomPlatformDataCoreText.cpp b/Source/WebCore/platform/graphics/coretext/FontCustomPlatformDataCoreText.cpp
+index b30dacf6fa..76787d3a97 100644
+--- a/Source/WebCore/platform/graphics/coretext/FontCustomPlatformDataCoreText.cpp
++++ b/Source/WebCore/platform/graphics/coretext/FontCustomPlatformDataCoreText.cpp
+@@ -210,6 +210,12 @@ static RetainPtr<CFDataRef> dataWithUniqueFontNames(CFDataRef data)
+ RefPtr<FontCustomPlatformData> FontCustomPlatformData::create(SharedBuffer& buffer, const String& itemInCollection)
+ {
+     RetainPtr extractedData = extractFontCustomPlatformDataSystemParser(buffer, itemInCollection);
++#if defined(WK26_IOS_TARGET)
++    // WK26: no FontParser before iOS 11 (the compat stub returns NULL); hand the sfnt
++    // (WOFF / WOFF2 already converted by CachedFont) to CoreText as it is.
++    if (!extractedData)
++        extractedData = buffer.createCFData();
++#endif
+     if (!extractedData) {
+         // Something is wrong with the font.
+         return nullptr;
+@@ -220,6 +226,12 @@ RefPtr<FontCustomPlatformData> FontCustomPlatformData::create(SharedBuffer& buff
+ #endif
+ 
+     RetainPtr fontDescriptor = adoptCF(CTFontManagerCreateFontDescriptorFromData(extractedData.get()));
++#if defined(WK26_IOS_TARGET)
++    // WK26: data CoreText cannot parse would give a font without a CTFont (blank
++    // glyphs, crash in system fallback); fail the load so CSS falls back instead.
++    if (!fontDescriptor)
++        return nullptr;
++#endif
+     Ref bufferRef = SharedBuffer::create(extractedData.get());
+ 
+     FontPlatformData::CreationData creationData = { WTF::move(bufferRef), itemInCollection };

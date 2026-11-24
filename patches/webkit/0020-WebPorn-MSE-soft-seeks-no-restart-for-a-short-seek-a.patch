@@ -1,7 +1,7 @@
 From f806387cdeb481ac016a01587ac27257d8f94d02 Mon Sep 17 00:00:00 2001
 From: wowodymyr <kokesiskigovno@gmail.com>
 Date: Tue, 24 Nov 2026 10:40:58 +0200
-Subject: [PATCH 20/24] WebPorn MSE: soft seeks (no restart for a short seek
+Subject: [PATCH 20/25] WebPorn MSE: soft seeks (no restart for a short seek
  ahead into written data: hls.js start/nudges), MSE debug logging; console
  messages to a file (/var/webporn/console-log)
 

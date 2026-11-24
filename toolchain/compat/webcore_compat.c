@@ -11,8 +11,8 @@
 // GraphicsServices: font cache purging on memory pressure; nothing to purge.
 void GSFontPurgeFontCache(void) { }
 
-// FontParser (newer than iOS 10): returning NULL makes WebCore fall back to
-// handing the font data to CoreText directly.
+// FontParser (newer than iOS 10): on NULL, WebCore (WK26_IOS_TARGET) hands the
+// font data to CoreText directly.
 CFArrayRef FPFontCreateFontsFromData(CFDataRef data) { return NULL; }
 CFDataRef FPFontCopySFNTData(const void* font) { return NULL; }
 

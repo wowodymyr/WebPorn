@@ -33,6 +33,10 @@ new engine; it takes effect the next time the app starts. Nothing is switched on
   switched on) and `WebPornSafari` (MobileSafari) in `/Library/MobileSubstrate/DynamicLibraries`,
   settings in `/var/mobile/Library/Preferences/net.webporn.swap.plist`.
 
+## Contributors
+
+- [wowodymyr](https://github.com/wowodymyr)
+
 ## License
 
 Same as WebKit: the engine and everything in this repository are distributed under the

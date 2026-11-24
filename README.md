@@ -73,6 +73,12 @@ What the `webporn` branch adds on top of the Web Port diff:
   literals (Darwin `.indirect_symbol` needs non-local symbols; LLVM limits movw/movt
   addends to 16 bits)
 - memory pressure source falls back to the pre-iOS 10 flag mask
+- LLInt's `checkpoint_osr_exit_from_inlined_call` trampoline passes the call result in
+  a1:a2 on Darwin armv7 (`OFFLINE_ASM_ARMv7_DARWIN`): Apple's ABI does not align 64-bit
+  arguments to an even register pair, and with the AAPCS layout a double returned into an
+  inlined varargs call site came back with its halves swapped (2.2250744e-308; JSTests
+  inline-call-varargs.js, timing dependent). Found with `tests/jsc/varargs-double-return.js`
+  (150 fresh copies per run) and `--verboseOSR`; the varargs-inlining workaround is gone.
 - `libwpcxxcompat.a` is linked hidden into every image (`WEBPORN_COMPAT_A`); it also
   carries iOS 10 libSystem calls (`os_log`, `mach_continuous_time`, `mkostemp`, dyld SPI)
 
